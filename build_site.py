@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent
 SITE = ROOT / "site"
 TOKEN_FILE = ROOT / "token.enc"
 NOTES_FILE = ROOT / "notes.enc"
+SETTINGS_FILE = ROOT / "settings.enc"
 DAYS_BACK = 140
 PBKDF2_ROUNDS = 250_000
 b64 = lambda b: base64.b64encode(b).decode()
@@ -111,6 +112,46 @@ def encrypt_page(html, password):
     return {"salt": b64(salt), "iv": b64(iv), "data": b64(data), "rounds": PBKDF2_ROUNDS}
 
 
+def load_encrypted(path, password, what):
+    """Read one of the browser-written files. Never let a bad one fail the build."""
+    if not path.exists():
+        return {}
+    try:
+        blob = json.loads(path.read_text(encoding="utf-8"))
+        key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                         salt=base64.b64decode(blob["salt"]),
+                         iterations=int(blob["rounds"])).derive(password.encode())
+        plain = AESGCM(key).decrypt(base64.b64decode(blob["iv"]),
+                                    base64.b64decode(blob["data"]), None)
+        out = json.loads(plain)
+        return out if isinstance(out, dict) else {}
+    except Exception as e:
+        print(f"::warning::Could not read {path.name} ({e}). Building without {what}.")
+        return {}
+
+
+def load_settings(password):
+    """His own training settings, saved from the Settings page, over config.json."""
+    saved = load_encrypted(SETTINGS_FILE, password, "his saved settings")
+    keep = {}
+    if isinstance(saved.get("max_hr"), int) and 120 <= saved["max_hr"] <= 230:
+        keep["max_hr"] = saved["max_hr"]
+    start = saved.get("plan_start")
+    if isinstance(start, str) and len(start) == 10:
+        try:
+            datetime.strptime(start, "%Y-%m-%d")
+            keep["plan_start"] = start
+        except ValueError:
+            pass
+    days = saved.get("plan_days")
+    if isinstance(days, dict):
+        clean = {k: v for k, v in days.items()
+                 if k in ("threshold", "easy", "long") and isinstance(v, int) and 0 <= v <= 6}
+        if clean:
+            keep["plan_days"] = clean
+    return keep
+
+
 def load_notes(password):
     """
     Your own notes about runs, written in the browser and saved back to this repo by
@@ -118,20 +159,7 @@ def load_notes(password):
     the page itself), because the repo is public. A broken or missing file must never
     fail the build - worst case the dashboard opens with no notes.
     """
-    if not NOTES_FILE.exists():
-        return {}
-    try:
-        blob = json.loads(NOTES_FILE.read_text(encoding="utf-8"))
-        key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
-                         salt=base64.b64decode(blob["salt"]),
-                         iterations=int(blob["rounds"])).derive(password.encode())
-        plain = AESGCM(key).decrypt(base64.b64decode(blob["iv"]),
-                                    base64.b64decode(blob["data"]), None)
-        notes = json.loads(plain)
-        return notes if isinstance(notes, dict) else {}
-    except Exception as e:
-        print(f"::warning::Could not read notes.enc ({e}). Building without notes.")
-        return {}
+    return load_encrypted(NOTES_FILE, password, "notes")
 
 
 SHELL = """<!doctype html>
@@ -147,9 +175,16 @@ SHELL = """<!doctype html>
 <link rel="icon" href="icon.png">
 <link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
 <title>Training Dashboard</title>
+<script>
+  try {
+    var t = localStorage.getItem('pref-theme');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {}
+</script>
 <style>
 :root { color-scheme: light; --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --muted:#6b6a66; --ring:rgba(11,11,11,.14); --accent:#2a78d6; --bad:#d03b3b; }
-@media (prefers-color-scheme: dark) { :root { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --muted:#a3a29b; --ring:rgba(255,255,255,.16); --accent:#3987e5; } }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --muted:#a3a29b; --ring:rgba(255,255,255,.16); --accent:#3987e5; } }
+:root[data-theme="dark"] { color-scheme: dark; --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --muted:#a3a29b; --ring:rgba(255,255,255,.16); --accent:#3987e5; }
 * { box-sizing: border-box; }
 body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--page); color:var(--ink);
   font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; padding:16px; }
@@ -273,6 +308,7 @@ def main():
     password = os.environ.get("DASHBOARD_PASSWORD", "")
     if len(password) < 6:
         fail("DASHBOARD_PASSWORD secret is missing or shorter than 6 characters.")
+    config.update(load_settings(password))          # what he chose on the Settings page wins
 
     mock = os.environ.get("MOCK_ACTIVITIES")
     if mock:

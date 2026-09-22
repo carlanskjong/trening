@@ -5,6 +5,7 @@
 - Explain every step he must do himself in plain, click-by-click language. Keep messages concise and direct.
 - **Hard constraint: everything must stay free** (GitHub free plan, GitHub Pages, free open-source libraries). No paid services.
 - Records runs with a Garmin watch + chest HR strap → Garmin Connect → Strava (paid Strava subscription).
+- Uses an **iPhone** (confirmed 23.09.2026), so the free Android APK route is not relevant.
 
 ## Your role
 Act as both **running coach** and **developer**. Coaching follows the **Norwegian method** and Marius Bakken's writing:
@@ -24,8 +25,8 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   derived from `STRAVA_CLIENT_SECRET` (the repo is public), and committed by the workflow, so each run costs
   two API calls once and nothing afterwards. At most 40 new runs per build, and it stops early if Strava's
   rate-limit headers say the window is nearly used up - the rest arrive on the next hourly build.
-- `report.py` – all dashboard HTML/CSS/SVG. It renders **one file containing four pages** – Home, Plan, Runs,
-  Progress – plus the menu (bottom tab bar on a phone, sidebar from 860px up). A tiny hash router (`#/home`,
+- `report.py` – all dashboard HTML/CSS/SVG. It renders **one file containing five pages** – Home, Plan, Runs,
+  Progress, Settings – plus the menu (bottom tab bar on a phone, sidebar from 860px up). A tiny hash router (`#/home`,
   `#/plan`, …) shows one `<section class="page">` at a time, so switching pages needs no network. The file is in
   five marked parts: settings/helpers, the plan logic, charts (hand-built inline SVG), the pages, and the
   shell (CSS + router). Public API used by `build_site.py`: `render(activities, config, details)` and `RUN_TYPES`.
@@ -58,6 +59,10 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   read/write) pasted once per device into the notes card and kept in that browser's `localStorage`.
   Every save also goes to `localStorage` first, so a note is never lost when there is no token or no signal.
   A push triggers the normal rebuild, which bakes the note into the page.
+- `settings.enc` – his training settings (`max_hr`, `plan_start`, `plan_days`), written from the Settings page
+  exactly like `notes.enc` and read by `load_settings()`, which **validates every field** before letting it
+  override `config.json`. Appearance and default map style are *not* in here: they are per device and live in
+  `localStorage` under `pref-*`.
 - GitHub secrets (do not rename): `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`, `DASHBOARD_PASSWORD`.
 - Live site: `https://<username>.github.io/trening/` – added to phone home screen as a web app.
 
@@ -95,13 +100,26 @@ What each page holds now, and what is still missing:
    that sync between devices.
 4. **Progress** – weekly volume, time in zones, easy pace at easy HR, threshold-session pace over time.
    **Still to do: best efforts (1k/5k/10k) and run-vs-run comparison.**
+**Better maps – investigated 23.09.2026, decision pending.** He dislikes the tile styles. What was found:
+  * **CARTO Positron / Dark Matter** (the obvious clean choice) **now needs a free API key**; without one the
+    tiles carry an "API key required" watermark. Doable but it puts a key in the page and needs him to register.
+  * **OpenFreeMap** is keyless, unlimited and free, but serves **vector** tiles, so it needs MapLibre GL JS
+    (~250 KB gzipped) vendored into the repo. That would give genuinely sharp maps at any zoom, proper
+    continuous pinch-zoom and much nicer styling - at the cost of the "no third-party JavaScript" property and
+    a real download. **Ask him before doing this.**
+  * Keyless raster alternatives (Esri canvas/imagery, OSM, CyclOSM) are what is shipped now; the retina trick
+    above is what most improved sharpness without changing provider.
+  Note: tile servers are unreachable from the test sandbox, so any new tile URL cannot be verified here - keep
+  to well-known URL patterns and have him confirm on the phone.
+
 **Asked for on 22.09.2026, not built yet:**
 5. **Map page in the menu** – a full-screen map to move around in, showing more than one run, plus a
    **heat map** of where he runs most often. `SlippyMap` is already reusable; it needs a route layer that can
    draw many polylines and count overlaps.
-6. **Settings page** – so far one setting: light / dark / **follow system** (system is the default today, via
-   `prefers-color-scheme`). A theme choice needs a `data-theme` attribute on `<html>` and CSS that honours it.
-   When it exists, move the GitHub token field there from the notes card. Later: max HR, zones, plan start.
+6. **Settings page** – done 23.09.2026: appearance (light / dark / follow system), default map style, training
+   settings (max HR, plan start, which weekday each session lands on), the GitHub token (moved here from the
+   notes card), and an About card with the build version, a "check for update" button and a "clear this device"
+   escape hatch. **Still possible later:** editing the zone percentages, shoe mileage, race goal.
 7. **A real installable app** – **checked 23.09.2026: TestFlight needs the Apple Developer Program at
    $99/year**, plus a Mac to build on, so it breaks the no-paid-services rule. The free route was built
    instead: the PWA above (installable, offline, instant updates). Remaining free options if he wants more:

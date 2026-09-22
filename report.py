@@ -50,7 +50,8 @@ DEFAULT_PLAN_DAYS = {"threshold": 1, "easy": 3, "long": 6}
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 SHORT_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-PAGES = [("home", "Home"), ("plan", "Plan"), ("runs", "Runs"), ("progress", "Progress")]
+PAGES = [("home", "Home"), ("plan", "Plan"), ("runs", "Runs"), ("progress", "Progress"),
+         ("settings", "Settings")]
 SECTIONS = PAGES + [("run", "Run")]   # /run/<id> has no tab of its own
 
 
@@ -579,6 +580,77 @@ def runs_payload(d):
     return out
 
 
+def page_settings(d):
+    """
+    Two kinds of setting. Appearance and map style are per device and take effect
+    instantly (they live in this browser). The training settings change what the
+    dashboard is built from, so they are saved to the repo like notes are and apply
+    on the next build - within a few minutes of saving.
+    """
+    days = "".join(f'<option value="{i}">{name}</option>' for i, name in enumerate(WEEKDAYS))
+    sess = {s["key"]: s for s in d["sessions"]}
+    appearance = (
+        '<div class="choices" id="themechoice" role="group" aria-label="Appearance">'
+        '<button type="button" data-theme="system">Follow phone</button>'
+        '<button type="button" data-theme="light">Light</button>'
+        '<button type="button" data-theme="dark">Dark</button></div>'
+        '<p class="hint">"Follow phone" uses whatever your phone or PC is set to, '
+        'including switching itself at night.</p>')
+
+    mapstyle = (
+        '<div class="choices" id="mapchoice" role="group" aria-label="Map style">'
+        '<button type="button" data-map="plain">Plain</button>'
+        '<button type="button" data-map="streets">Streets</button>'
+        '<button type="button" data-map="satellite">Satellite</button></div>'
+        '<p class="hint">Which map a run opens with. You can still switch on the run itself.</p>')
+
+    training = (
+        f'<label class="field"><span>Maximum heart rate</span>'
+        f'<input type="number" id="setmaxhr" min="120" max="230" value="{d["max_hr"]}"></label>'
+        f'<p class="hint">Every zone is worked out from this. {bpm(d["max_hr"], 82)}–'
+        f'{bpm(d["max_hr"], 88) - 1} bpm is your threshold band today.</p>'
+        f'<label class="field"><span>Plan week 1 starts</span>'
+        f'<input type="date" id="setstart" value="{d["plan_start"].isoformat()}"></label>'
+        f'<label class="field"><span>Threshold session</span>'
+        f'<select id="setday-threshold">{days}</select></label>'
+        f'<label class="field"><span>Easy run</span>'
+        f'<select id="setday-easy">{days}</select></label>'
+        f'<label class="field"><span>Long run</span>'
+        f'<select id="setday-long">{days}</select></label>'
+        f'<div class="noterow"><button type="button" id="savetraining">Save</button>'
+        f'<span class="hint" id="trainingstatus"></span></div>'
+        f'<p class="hint">These change how the dashboard is built, so they appear after the '
+        f'next update - a few minutes. Saving needs the GitHub token below.</p>')
+
+    syncing = (
+        '<p class="hint" style="margin-top:0">Notes and the settings above are saved into your own '
+        'GitHub repository, encrypted with your dashboard password. Reading needs nothing; writing '
+        'needs a token, pasted once per device and kept only in this browser.</p>'
+        '<div class="noterow"><input type="password" id="ghtoken" placeholder="github_pat_…" '
+        'autocomplete="off"><button type="button" id="tokensave">Save token</button></div>'
+        '<p class="hint" id="tokenstatus"></p>')
+
+    about = (
+        f'<div class="zlist">'
+        f'<div class="zrow"><span>App version</span><span class="num">{d["version"]}</span></div>'
+        f'<div class="zrow"><span>Runs stored</span><span class="num">{len(d["runs"])}</span></div>'
+        f'<div class="zrow"><span>With heart-rate detail</span><span class="num">{d["detailed"]}</span></div>'
+        f'</div>'
+        f'<div class="noterow"><button type="button" id="checkupdate">Check for update</button>'
+        f'<span class="hint" id="updatestatus"></span></div>'
+        f'<details class="tokenbox"><summary>Trouble? Clear this device</summary>'
+        f'<p class="hint">Forgets the saved password, the token and anything not yet synced on '
+        f'this device. Your runs and saved notes are not touched.</p>'
+        f'<div class="noterow"><button type="button" id="clearlocal">Clear this device</button></div>'
+        f'</details>')
+
+    return (card(appearance, head="Appearance")
+            + card(mapstyle, head="Maps")
+            + card(training, head="Training")
+            + card(syncing, head="Saving and syncing")
+            + card(about, head="About"))
+
+
 def page_run(d):
     """An empty shell - the browser fills it in from RUNS when a run is opened."""
     return ('<a class="back" href="#/runs">← All runs</a>'
@@ -618,6 +690,7 @@ ICONS = {
     "plan": '<rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M8 3v4M16 3v4M3.5 10h17"/>',
     "runs": '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
     "progress": '<path d="M3 17l5.5-5.5 3.5 3.5L21 6"/><path d="M15 6h6v6"/>',
+    "settings": '<circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.5a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H2a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.6 1z"/>',
 }
 
 
@@ -635,13 +708,20 @@ CSS = """
   --s0:#b8b7b1; --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --page:#0d0d0d; --surface:#1a1a19; --raise:#242422; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
     --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10); --good:#0ca30c; --warn:#d98a1f;
     --accent:#3987e5; --accentsoft:rgba(57,135,229,.16);
     --s0:#5a5955; --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
   }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page:#0d0d0d; --surface:#1a1a19; --raise:#242422; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10); --good:#0ca30c; --warn:#d98a1f;
+  --accent:#3987e5; --accentsoft:rgba(57,135,229,.16);
+  --s0:#5a5955; --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
 }
 * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 body { margin:0; background:var(--page); color:var(--ink);
@@ -766,8 +846,9 @@ h3 { font-size:19px; margin:0 0 6px; letter-spacing:-.01em; }
 .mapzoom button { width:30px; height:30px; font-size:16px; padding:0; }
 .mapctl button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
 .mapbig { position:absolute; z-index:2; right:8px; bottom:20px; }
+.mapinner { position:absolute; inset:0; will-change:transform; }
 .maptiles { position:absolute; inset:0; }
-img.maptile { position:absolute; width:256px; height:256px; }
+img.maptile { position:absolute; }
 svg.route { position:absolute; inset:0; width:100%; height:100%; }
 .routeline { fill:none; stroke:#e8462a; stroke-width:4; stroke-linejoin:round; stroke-linecap:round; opacity:.92; }
 .startdot { fill:#fff; stroke:#e8462a; stroke-width:3; }
@@ -804,6 +885,20 @@ body.noscroll { overflow:hidden; }
   .sheet { padding:24px; }
   .sheetbox { max-width:1000px; max-height:92vh; height:auto; border-radius:16px; overflow:hidden; }
 }
+
+/* ---- settings ---- */
+.choices { display:flex; gap:8px; flex-wrap:wrap; }
+.choices button { flex:1; min-width:90px; font:inherit; font-size:14px; padding:10px 8px;
+  border:1px solid var(--ring); border-radius:10px; background:var(--page); color:var(--ink);
+  cursor:pointer; }
+.choices button:hover { background:var(--raise); }
+.choices button.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+.field { display:flex; align-items:center; gap:12px; justify-content:space-between;
+  padding:9px 0; border-bottom:1px solid var(--grid); font-size:15px; }
+.field:last-of-type { border-bottom:0; }
+.field input, .field select { font:inherit; font-size:15px; padding:8px 10px; border-radius:9px;
+  border:1px solid var(--ring); background:var(--page); color:var(--ink); min-width:140px; }
+.field input[type=number] { width:100px; min-width:0; }
 
 /* ---- notes ---- */
 #notetext, #ghtoken { width:100%; font:inherit; font-size:15px; padding:10px 12px; border-radius:10px;
@@ -977,24 +1072,43 @@ RUN_VIEW = r"""
     return [(lng + 180) / 360 * n, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n];
   }
 
+  var ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
   var LAYERS = [
-    { id: 'map', name: 'Map', max: 19, attrib: '© OpenStreetMap',
+    // A quiet grey basemap, so the route is the thing you see. It has a light and a
+    // dark version, and follows whichever appearance the app is in.
+    { id: 'plain', name: 'Plain', max: 16, attrib: '© Esri, © OpenStreetMap',
+      url: ESRI + 'Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+      darkUrl: ESRI + 'Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' },
+    { id: 'streets', name: 'Streets', max: 19, attrib: '© OpenStreetMap',
       url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' },
-    { id: 'terrain', name: 'Terrain', max: 17, attrib: '© OpenTopoMap (CC-BY-SA)', subs: ['a', 'b', 'c'],
-      url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png' },
     { id: 'satellite', name: 'Satellite', max: 19, attrib: 'Imagery © Esri',
-      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}' }
+      url: ESRI + 'World_Imagery/MapServer/tile/{z}/{y}/{x}' }
   ];
   function layerById(id) {
     for (var i = 0; i < LAYERS.length; i++) if (LAYERS[i].id === id) return LAYERS[i];
     return LAYERS[0];
   }
   var savedLayer = (function () {
-    try { return localStorage.getItem('dash-layer') || 'map'; } catch (e) { return 'map'; }
+    try { return localStorage.getItem('dash-layer') || localStorage.getItem('pref-map') || 'plain'; }
+    catch (e) { return 'plain'; }
   })();
+  function isDark() {
+    var set = document.documentElement.getAttribute('data-theme');
+    if (set) return set === 'dark';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  // Tiles are 256px pictures. On a phone screen that is two device pixels per CSS
+  // pixel they look soft, so fetch one zoom level deeper and draw them at half
+  // size - four sharper tiles in place of one blurry one.
+  var DPR = Math.min(2, Math.round(window.devicePixelRatio || 1));
+  var FINER = DPR >= 2 ? 1 : 0;
+  var TILE = 256 / (FINER ? 2 : 1);
 
-  // A small slippy map: tiles in a layer that we move, with the route drawn over it.
-  // Written by hand so the dashboard needs no third-party JavaScript.
+  /*
+   * A small slippy map, written by hand so the dashboard needs no third-party
+   * JavaScript. Tiles and the route live in ONE moving layer, so a pinch scales
+   * both together and the route can never lag behind the map under it.
+   */
   function SlippyMap(el, points, opts) {
     opts = opts || {};
     var self = this;
@@ -1003,17 +1117,19 @@ RUN_VIEW = r"""
     this.layer = layerById(savedLayer);
     this.z = 14; this.cx = 0; this.cy = 0;          // centre, in pixels at zoom z
     el.classList.add('map');
-    el.innerHTML = '<div class="maptiles"></div>' +
+    el.innerHTML = '<div class="mapinner">' +
+      '<div class="maptiles"></div>' +
       '<svg class="route" preserveAspectRatio="none"><polyline class="routeline"/>' +
-      '<circle class="startdot" r="5"/></svg>' +
+      '<circle class="startdot" r="5"/></svg></div>' +
       '<div class="mapctl">' +
       LAYERS.map(function (l) {
         return '<button type="button" data-layer="' + l.id + '">' + l.name + '</button>';
       }).join('') + '</div>' +
-      '<div class="mapzoom"><button type="button" data-zoom="1">+</button>' +
-      '<button type="button" data-zoom="-1">−</button></div>' +
+      '<div class="mapzoom"><button type="button" data-zoom="1" aria-label="Zoom in">+</button>' +
+      '<button type="button" data-zoom="-1" aria-label="Zoom out">−</button></div>' +
       (opts.expand ? '<button type="button" class="mapbig" title="Bigger">⤢</button>' : '') +
       '<span class="attrib"></span>';
+    this.inner = el.querySelector('.mapinner');
     this.tiles = el.querySelector('.maptiles');
     this.svg = el.querySelector('.route');
     this.line = el.querySelector('.routeline');
@@ -1028,7 +1144,7 @@ RUN_VIEW = r"""
   };
 
   SlippyMap.prototype.fit = function () {
-    var s = this.size(), w = s[0], h = s[1], pad = 24, z, i, p, xs, ys;
+    var s = this.size(), w = s[0], h = s[1], pad = 26, z, i, p, xs, ys;
     if (!this.pts.length) { this.render(); return; }
     for (z = this.layer.max; z > 2; z--) {
       xs = []; ys = [];
@@ -1046,25 +1162,31 @@ RUN_VIEW = r"""
 
   SlippyMap.prototype.tileUrl = function (x, y, z) {
     var n = Math.pow(2, z), wx = ((x % n) + n) % n;
-    return this.layer.url.replace('{z}', z).replace('{x}', wx).replace('{y}', y)
+    var url = (this.layer.darkUrl && isDark()) ? this.layer.darkUrl : this.layer.url;
+    return url.replace('{z}', z).replace('{x}', wx).replace('{y}', y)
       .replace('{s}', this.layer.subs ? this.layer.subs[(wx + y) % this.layer.subs.length] : 'a');
   };
 
   SlippyMap.prototype.render = function () {
     var s = this.size(), w = s[0], h = s[1];
-    var left = this.cx - w / 2, top = this.cy - h / 2, n = Math.pow(2, this.z);
-    var x0 = Math.floor(left / 256), x1 = Math.floor((left + w) / 256);
-    var y0 = Math.floor(top / 256), y1 = Math.floor((top + h) / 256);
+    var left = this.cx - w / 2, top = this.cy - h / 2;
+    // Tiles come from one zoom deeper on a sharp screen, drawn at half size.
+    var tz = Math.min(this.z + FINER, this.layer.max + FINER), n = Math.pow(2, tz);
+    var scale = Math.pow(2, tz - this.z);       // world pixels per css pixel
+    var tileCss = 256 / scale;
+    var x0 = Math.floor(left * scale / 256), x1 = Math.floor((left + w) * scale / 256);
+    var y0 = Math.floor(top * scale / 256), y1 = Math.floor((top + h) * scale / 256);
     var html = '', x, y;
     for (x = x0; x <= x1; x++) {
       for (y = Math.max(y0, 0); y <= Math.min(y1, n - 1); y++) {
         html += '<img class="maptile" alt="" onerror="this.style.visibility=\'hidden\'" src="' +
-          this.tileUrl(x, y, this.z) + '" style="left:' + Math.round(x * 256 - left) +
-          'px;top:' + Math.round(y * 256 - top) + 'px">';
+          this.tileUrl(x, y, tz) + '" style="width:' + tileCss + 'px;height:' + tileCss +
+          'px;left:' + (x * tileCss - left).toFixed(2) + 'px;top:' +
+          (y * tileCss - top).toFixed(2) + 'px">';
       }
     }
     this.tiles.innerHTML = html;
-    this.tiles.style.transform = '';
+    this.inner.style.transform = '';
     this.attrib.textContent = this.layer.attrib;
     this.svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
     var line = '', p;
@@ -1087,10 +1209,15 @@ RUN_VIEW = r"""
     }
   };
 
+  // Zoom by a whole step, keeping whatever is under (ax, ay) where it is.
   SlippyMap.prototype.zoomBy = function (step, ax, ay) {
-    var s = this.size(), z = Math.max(3, Math.min(this.layer.max, this.z + step));
-    if (z === this.z) return;
-    // keep the point under the cursor (or the centre) where it is
+    this.zoomTo(this.z + step, ax, ay);
+  };
+
+  SlippyMap.prototype.zoomTo = function (z, ax, ay) {
+    var s = this.size();
+    z = Math.max(3, Math.min(this.layer.max, Math.round(z)));
+    if (z === this.z) { this.render(); return; }
     ax = ax == null ? s[0] / 2 : ax; ay = ay == null ? s[1] / 2 : ay;
     var wx = this.cx - s[0] / 2 + ax, wy = this.cy - s[1] / 2 + ay;
     var k = Math.pow(2, z - this.z);
@@ -1100,29 +1227,27 @@ RUN_VIEW = r"""
   };
 
   SlippyMap.prototype.setLayer = function (id) {
-    var was = this.layer;
     this.layer = layerById(id);
     try { localStorage.setItem('dash-layer', id); } catch (e) {}
     savedLayer = id;
-    if (this.z > this.layer.max) this.zoomBy(this.layer.max - this.z);
+    if (this.z > this.layer.max) this.zoomTo(this.layer.max);
     else this.render();
-    if (was !== this.layer) this.render();
   };
 
   SlippyMap.prototype.bind = function (opts) {
     var self = this, el = this.el, drag = null, pinch = null;
+
     el.addEventListener('pointerdown', function (e) {
-      if (e.target.closest('button')) return;
-      drag = { x: e.clientX, y: e.clientY, moved: 0 };
+      if (e.target.closest('button') || pinch) return;
+      drag = { x: e.clientX, y: e.clientY };
       el.setPointerCapture(e.pointerId);
       el.classList.add('grabbing');
     });
     el.addEventListener('pointermove', function (e) {
       if (!drag || pinch) return;
-      var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-      drag.moved += Math.abs(dx) + Math.abs(dy);
+      self.cx -= e.clientX - drag.x;
+      self.cy -= e.clientY - drag.y;
       drag.x = e.clientX; drag.y = e.clientY;
-      self.cx -= dx; self.cy -= dy;
       self.render();
     });
     function endDrag(e) {
@@ -1133,6 +1258,7 @@ RUN_VIEW = r"""
     }
     el.addEventListener('pointerup', endDrag);
     el.addEventListener('pointercancel', endDrag);
+
     el.addEventListener('wheel', function (e) {
       e.preventDefault();
       var r = el.getBoundingClientRect();
@@ -1142,38 +1268,59 @@ RUN_VIEW = r"""
       var r = el.getBoundingClientRect();
       self.zoomBy(1, e.clientX - r.left, e.clientY - r.top);
     });
-    // two-finger pinch: scale the tiles live, then settle on a whole zoom step
+
+    /*
+     * Pinch. While two fingers are down the whole layer - tiles and route
+     * together - is scaled and shifted with a CSS transform, which the phone
+     * does on every frame. Nothing is redrawn until the fingers lift, and then
+     * the map settles on the nearest whole zoom level and the tiles come back
+     * sharp.
+     */
+    function centreOf(e, rect) {
+      return [(e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left,
+              (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top];
+    }
+    function spread(e) {
+      return Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                        e.touches[0].clientY - e.touches[1].clientY);
+    }
     el.addEventListener('touchstart', function (e) {
       if (e.touches.length !== 2) return;
       drag = null;
-      var r = el.getBoundingClientRect();
-      pinch = {
-        d: Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                      e.touches[0].clientY - e.touches[1].clientY),
-        x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
-        y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top
-      };
+      var rect = el.getBoundingClientRect(), at = centreOf(e, rect);
+      pinch = { d: spread(e), x: at[0], y: at[1], k: 1, dx: 0, dy: 0 };
+      self.inner.style.transformOrigin = at[0] + 'px ' + at[1] + 'px';
     }, { passive: true });
     el.addEventListener('touchmove', function (e) {
       if (!pinch || e.touches.length !== 2) return;
       e.preventDefault();
-      var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                         e.touches[0].clientY - e.touches[1].clientY);
-      var k = d / pinch.d;
-      self.tiles.style.transformOrigin = pinch.x + 'px ' + pinch.y + 'px';
-      self.tiles.style.transform = 'scale(' + k + ')';
-      pinch.k = k;
+      var rect = el.getBoundingClientRect(), at = centreOf(e, rect);
+      pinch.k = spread(e) / pinch.d;
+      pinch.dx = at[0] - pinch.x;
+      pinch.dy = at[1] - pinch.y;
+      self.inner.style.transform =
+        'translate(' + pinch.dx.toFixed(1) + 'px,' + pinch.dy.toFixed(1) + 'px) scale(' +
+        pinch.k.toFixed(4) + ')';
     }, { passive: false });
     function endPinch() {
       if (!pinch) return;
-      var step = Math.round(Math.log(pinch.k || 1) / Math.LN2);
-      var at = [pinch.x, pinch.y];
+      var k = pinch.k || 1, ax = pinch.x, ay = pinch.y, dx = pinch.dx, dy = pinch.dy;
       pinch = null;
-      self.tiles.style.transform = '';
-      if (step) self.zoomBy(step, at[0], at[1]); else self.render();
+      self.inner.style.transform = '';
+      var s = self.size();
+      // undo the drag part of the gesture, then settle on a whole zoom level
+      self.cx -= dx; self.cy -= dy;
+      var target = Math.max(3, Math.min(self.layer.max, Math.round(self.z + Math.log(k) / Math.LN2)));
+      if (target === self.z) { self.render(); return; }
+      var wx = self.cx - s[0] / 2 + ax, wy = self.cy - s[1] / 2 + ay;
+      var f = Math.pow(2, target - self.z);
+      self.cx = wx * f - (ax - s[0] / 2); self.cy = wy * f - (ay - s[1] / 2);
+      self.z = target;
+      self.render();
     }
     el.addEventListener('touchend', endPinch);
     el.addEventListener('touchcancel', endPinch);
+
     el.addEventListener('click', function (e) {
       var b = e.target.closest('button');
       if (!b) return;
@@ -1183,6 +1330,7 @@ RUN_VIEW = r"""
       else if (b.classList.contains('mapbig') && opts.expand) opts.expand();
     });
   };
+
   // ---------- charts ----------
   var W = 760;
   function smooth(values) {
@@ -1359,17 +1507,18 @@ RUN_VIEW = r"""
       var box = body.querySelector('#zoomcharts'), out = body.querySelector('#zoomout');
       out.dataset.idle = 'Move across the charts to read any point.';
       function draw() {
-        view.i0 = Math.max(0, Math.round(view.i0));
-        view.i1 = Math.min(n, Math.round(view.i1));
-        if (view.i1 - view.i0 < 8) view.i1 = Math.min(n, view.i0 + 8);
-        box.innerHTML = chartsHTML(run, view.i0, view.i1, true);
-        box.dataset.count = view.i1 - view.i0;
+        var from = Math.max(0, Math.round(view.i0));
+        var to = Math.min(n, Math.round(view.i1));
+        if (to - from < 8) to = Math.min(n, from + 8);
+        box.innerHTML = chartsHTML(run, from, to, true);
+        box.dataset.count = to - from;
+        box.dataset.from = from;
         out.textContent = out.dataset.idle;
-        var from = run.d && run.d[view.i0] != null ? (run.d[view.i0] / 1000).toFixed(2) : '0';
-        var to = run.d && run.d[view.i1 - 1] != null ? (run.d[view.i1 - 1] / 1000).toFixed(2) : '?';
+        var kmA = run.d && run.d[from] != null ? (run.d[from] / 1000).toFixed(2) : '0';
+        var kmB = run.d && run.d[to - 1] != null ? (run.d[to - 1] / 1000).toFixed(2) : '?';
         body.querySelector('#zoomrange').textContent =
-          'Showing ' + from + ' km to ' + to + ' km of the run.';
-        attachProbe(box, out, run, view.i0);
+          'Showing ' + kmA + ' km to ' + kmB + ' km of the run.';
+        attachProbe(box, out, run, from);
       }
       function zoom(k) {                       // k < 1 zooms in, around the middle
         var mid = (view.i0 + view.i1) / 2, half = (view.i1 - view.i0) * k / 2;
@@ -1393,25 +1542,48 @@ RUN_VIEW = r"""
         else if (a === 'right') pan(1);
         else { view.i0 = 0; view.i1 = n; draw(); }
       });
-      // pinch on the charts zooms the window too
-      var pinch = null;
+      /*
+       * Pinch and two-finger drag on the charts. The window follows the fingers
+       * continuously - spread them a little and it widens a little - instead of
+       * jumping a whole step at a time. Redraws are tied to the screen's own
+       * refresh so it stays smooth.
+       */
+      var pinch = null, queued = false;
+      function schedule() {
+        if (queued) return;
+        queued = true;
+        requestAnimationFrame(function () { queued = false; draw(); });
+      }
+      function fingers(e) {
+        return {
+          d: Math.max(20, Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                                     e.touches[0].clientY - e.touches[1].clientY)),
+          x: (e.touches[0].clientX + e.touches[1].clientX) / 2
+        };
+      }
       box.addEventListener('touchstart', function (e) {
-        if (e.touches.length === 2) {
-          pinch = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                             e.touches[0].clientY - e.touches[1].clientY);
-        }
+        if (e.touches.length !== 2) return;
+        var f = fingers(e);
+        var rect = box.getBoundingClientRect();
+        pinch = { d: f.d, x: f.x, i0: view.i0, i1: view.i1,
+                  anchor: Math.min(1, Math.max(0, (f.x - rect.left) / rect.width)) };
       }, { passive: true });
-      box.addEventListener('touchend', function () {
-        if (!pinch) return;
-        pinch = null;
-      });
       box.addEventListener('touchmove', function (e) {
         if (!pinch || e.touches.length !== 2) return;
-        var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                           e.touches[0].clientY - e.touches[1].clientY);
-        if (d / pinch > 1.6) { pinch = d; zoom(0.6); }
-        else if (d / pinch < 0.625) { pinch = d; zoom(1.7); }
-      }, { passive: true });
+        e.preventDefault();
+        var f = fingers(e), rect = box.getBoundingClientRect();
+        var span = pinch.i1 - pinch.i0;
+        var fresh = Math.max(8, Math.min(n, span / (f.d / pinch.d)));
+        // keep whatever sits under the middle of the fingers in place
+        var at = pinch.i0 + span * pinch.anchor;
+        var start = at - fresh * pinch.anchor - (f.x - pinch.x) / rect.width * fresh;
+        view.i0 = Math.max(0, Math.min(n - fresh, start));
+        view.i1 = view.i0 + fresh;
+        schedule();
+      }, { passive: false });
+      function stopPinch() { pinch = null; }
+      box.addEventListener('touchend', stopPinch);
+      box.addEventListener('touchcancel', stopPinch);
       draw();
     });
   }
@@ -1428,7 +1600,7 @@ RUN_VIEW = r"""
    * and kept in this browser only.
    * ---------------------------------------------------------------- */
   var NOTES = window.NOTES || {};
-  var notesSha = null, pulled = false;
+  var shas = {}, pulled = false;
 
   var store = {
     token: function (v) {
@@ -1506,32 +1678,38 @@ RUN_VIEW = r"""
     } catch (e) { /* offline, no file yet, or a different password - not fatal */ }
   }
 
-  async function pushNotes() {
+  // Write one encrypted file into the repo. Notes and settings both use this.
+  async function putEncrypted(path, obj, message) {
     var token = store.token(), pw = store.password();
     if (!token) return { ok: false, why: 'no-token' };
     if (!pw) return { ok: false, why: 'no-password' };
     if (!conf.repo) return { ok: false, why: 'no-repo' };
-    var api = 'https://api.github.com/repos/' + conf.repo + '/contents/notes.enc';
+    var api = 'https://api.github.com/repos/' + conf.repo + '/contents/' + path;
     var head = { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' };
     try {
-      if (notesSha === null) {                 // find the file's current version first
+      if (shas[path] === undefined) {          // find the file's current version first
         var get = await fetch(api + '?ref=main', { headers: head, cache: 'no-store' });
-        if (get.ok) notesSha = (await get.json()).sha;
-        else if (get.status === 404) notesSha = '';
+        if (get.ok) shas[path] = (await get.json()).sha;
+        else if (get.status === 404) shas[path] = '';
         else return { ok: false, why: get.status === 401 || get.status === 403 ? 'bad-token' : 'http' };
       }
-      var body = { message: 'Save run notes', content: btoa(unescape(encodeURIComponent(
-        await encryptNotes(NOTES, pw)))), branch: 'main' };
-      if (notesSha) body.sha = notesSha;
+      var body = { message: message, content: btoa(unescape(encodeURIComponent(
+        await encryptNotes(obj, pw)))), branch: 'main' };
+      if (shas[path]) body.sha = shas[path];
       var put = await fetch(api, { method: 'PUT', headers: head, body: JSON.stringify(body) });
-      if (put.status === 409 || put.status === 422) { notesSha = null; return { ok: false, why: 'conflict' }; }
+      if (put.status === 409 || put.status === 422) {
+        delete shas[path];
+        return { ok: false, why: 'conflict' };
+      }
       if (!put.ok) return { ok: false, why: put.status === 401 || put.status === 403 ? 'bad-token' : 'http' };
-      notesSha = (await put.json()).content.sha;
+      shas[path] = (await put.json()).content.sha;
       return { ok: true };
     } catch (e) {
       return { ok: false, why: 'offline' };
     }
   }
+
+  function pushNotes() { return putEncrypted('notes.enc', NOTES, 'Save run notes'); }
 
   var WHY = {
     'no-token': 'Saved on this device. Add a GitHub token below to sync it to your other devices.',
@@ -1545,19 +1723,16 @@ RUN_VIEW = r"""
 
   function notesBlock(run) {
     var note = NOTES[run.id] || {};
-    var hasToken = !!store.token();
+    var tail = store.token() ? ''
+      : '<p class="hint">Notes save on this device straight away. To have them appear on your ' +
+        'other devices too, add a GitHub token in <a href="#/settings">Settings</a>.</p>';
     return '<section class="card" id="notecard"><h2>Your notes</h2>' +
       '<textarea id="notetext" rows="4" placeholder="How did it feel? Legs, weather, anything worth ' +
       'remembering next time.">' + esc(note.text || '') + '</textarea>' +
       '<div class="noterow"><button type="button" id="notesave">Save</button>' +
-      '<span id="notestatus" class="hint">' + (note.updated ? 'Last saved ' + esc(note.updated.slice(0, 16).replace('T', ' ')) : '') + '</span></div>' +
-      '<details class="tokenbox"' + (hasToken ? '' : '') + '><summary>' +
-      (hasToken ? 'Syncing is set up · change token' : 'Set up syncing between phone and PC') + '</summary>' +
-      '<p class="hint">Notes save on this device straight away. To have them appear on your other ' +
-      'devices too, paste a GitHub token here once per device. It is stored only in this browser.</p>' +
-      '<div class="noterow"><input type="password" id="ghtoken" placeholder="github_pat_..." ' +
-      'autocomplete="off"><button type="button" id="tokensave">Save token</button></div>' +
-      '<p class="hint" id="tokenstatus"></p></details></section>';
+      '<span id="notestatus" class="hint">' +
+      (note.updated ? 'Last saved ' + esc(note.updated.slice(0, 16).replace('T', ' ')) : '') +
+      '</span></div>' + tail + '</section>';
   }
 
   function wireNotes(run) {
@@ -1576,6 +1751,89 @@ RUN_VIEW = r"""
       status.textContent = res.ok ? 'Saved and synced.' : WHY[res.why] || 'Saved on this device.';
       saveBtn.disabled = false;
     });
+  }
+  /* ----------------------------------------------------------------
+   * Settings
+   *
+   * Appearance and map style are per device: they live in this browser and
+   * change the moment you tap them. The training settings change how the
+   * dashboard is built, so they go to settings.enc in the repo the same way
+   * notes do, and take effect on the next build.
+   * ---------------------------------------------------------------- */
+  var prefs = {
+    get: function (k, fallback) {
+      try { return localStorage.getItem('pref-' + k) || fallback; } catch (e) { return fallback; }
+    },
+    set: function (k, v) { try { localStorage.setItem('pref-' + k, v); } catch (e) {} }
+  };
+
+  function applyTheme(choice) {
+    var root = document.documentElement;
+    if (choice === 'light' || choice === 'dark') root.setAttribute('data-theme', choice);
+    else root.removeAttribute('data-theme');
+    var dark = choice === 'dark' ||
+      (choice !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', dark ? '#0d0d0d' : '#f9f9f7');
+  }
+  applyTheme(prefs.get('theme', 'system'));
+
+  function markChosen(group, attr, value) {
+    var buttons = document.querySelectorAll('#' + group + ' button');
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].classList.toggle('on', buttons[i].dataset[attr] === value);
+    }
+  }
+
+  function wireSettings() {
+    var themes = document.getElementById('themechoice');
+    if (!themes) return;
+    markChosen('themechoice', 'theme', prefs.get('theme', 'system'));
+    themes.addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b) return;
+      prefs.set('theme', b.dataset.theme);
+      applyTheme(b.dataset.theme);
+      markChosen('themechoice', 'theme', b.dataset.theme);
+    });
+
+    markChosen('mapchoice', 'map', prefs.get('map', 'plain'));
+    document.getElementById('mapchoice').addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b) return;
+      prefs.set('map', b.dataset.map);
+      markChosen('mapchoice', 'map', b.dataset.map);
+    });
+
+    // training settings start from what this build was made with
+    var days = conf.planDays || {};
+    ['threshold', 'easy', 'long'].forEach(function (k) {
+      var sel = document.getElementById('setday-' + k);
+      if (sel) sel.value = String(days[k]);
+    });
+
+    var status = document.getElementById('trainingstatus');
+    document.getElementById('savetraining').addEventListener('click', async function () {
+      var btn = this;
+      btn.disabled = true;
+      status.textContent = 'Saving…';
+      var body = {
+        max_hr: parseInt(document.getElementById('setmaxhr').value, 10) || conf.maxhr,
+        plan_start: document.getElementById('setstart').value || conf.planStart,
+        plan_days: {
+          threshold: +document.getElementById('setday-threshold').value,
+          easy: +document.getElementById('setday-easy').value,
+          long: +document.getElementById('setday-long').value
+        },
+        updated: new Date().toISOString()
+      };
+      var res = await putEncrypted('settings.enc', body, 'Save training settings');
+      status.textContent = res.ok
+        ? 'Saved. The dashboard rebuilds with it in a few minutes.'
+        : (WHY[res.why] || 'Could not save.').replace('Saved on this device. ', '');
+      btn.disabled = false;
+    });
+
     var tokenInput = document.getElementById('ghtoken');
     document.getElementById('tokensave').addEventListener('click', async function () {
       var value = tokenInput.value.trim();
@@ -1585,10 +1843,38 @@ RUN_VIEW = r"""
       if (!value) { out.textContent = 'Token removed from this device.'; return; }
       out.textContent = 'Checking…';
       var res = await pushNotes();
-      out.textContent = res.ok ? 'Token works - your notes now sync.' : WHY[res.why] || 'That did not work.';
+      out.textContent = res.ok ? 'Token works - your notes and settings now sync.'
+        : (WHY[res.why] || 'That did not work.').replace('Saved on this device. ', '');
       tokenInput.value = '';
     });
+    if (store.token()) document.getElementById('tokenstatus').textContent = 'A token is saved on this device.';
+
+    document.getElementById('checkupdate').addEventListener('click', function () {
+      var out = document.getElementById('updatestatus');
+      out.textContent = 'Checking…';
+      if (!('serviceWorker' in navigator)) { out.textContent = 'Not supported in this browser.'; return; }
+      navigator.serviceWorker.getRegistration().then(function (reg) {
+        if (!reg) { out.textContent = 'No app installed yet - add it to your home screen.'; return; }
+        return reg.update().then(function () {
+          setTimeout(function () {
+            out.textContent = document.getElementById('update').hidden
+              ? 'You are on the newest version.' : 'A new version is ready - see the bar below.';
+          }, 1500);
+        });
+      }).catch(function () { out.textContent = 'Could not check just now.'; });
+    });
+
+    document.getElementById('clearlocal').addEventListener('click', function () {
+      try {
+        ['dash-pw', 'dash-page', 'dash-notes', 'gh-token', 'dash-layer'].forEach(function (k) {
+          localStorage.removeItem(k);
+        });
+        sessionStorage.removeItem('dash-pw');
+      } catch (e) {}
+      location.reload();
+    });
   }
+
   // ---------- the run page ----------
   function statGrid(run) {
     var cells = [
@@ -1734,6 +2020,8 @@ RUN_VIEW = r"""
       setTimeout(function () { new SlippyMap(el, pts, {}); }, 0);
     });
   }
+
+  wireSettings();
 
   var resizeTimer = null;                      // the map is pixel-based, so redraw it on resize
   window.addEventListener('resize', function () {
@@ -1910,6 +2198,8 @@ def prepare(activities, config, details=None):
         "latest": runs[0] if runs else None,
         "easy_points": easy_points, "thr_points": thr_points,
         "updated": config.get("updated", datetime.now().strftime("%d.%m.%Y %H:%M")),
+        "version": config.get("version", "dev"),
+        "plan_days": {**DEFAULT_PLAN_DAYS, **config.get("plan_days", {})},
     }
 
 
@@ -1920,9 +2210,10 @@ def render(activities, config, details=None, notes=None):
         "plan": ("Plan", "3 runs a week: one threshold session, two easy · Norwegian method"),
         "runs": ("Runs", "Your runs from Strava, last 140 days"),
         "progress": ("Progress", f'Max heart rate {d["max_hr"]} bpm · updated {d["updated"]}'),
+        "settings": ("Settings", "Appearance is per device; training settings sync to your other devices"),
     }
     bodies = {"home": page_home(d), "plan": page_plan(d), "runs": page_runs(d),
-              "progress": page_progress(d), "run": page_run(d)}
+              "progress": page_progress(d), "settings": page_settings(d), "run": page_run(d)}
     sections = "".join(
         f'<section class="page" id="{key}" aria-label="{label}">'
         + ("" if key == "run" else
@@ -1931,7 +2222,9 @@ def render(activities, config, details=None, notes=None):
         for key, label in SECTIONS)
     conf = {"maxhr": d["max_hr"], "zones": [[k, label, lo, hi] for k, label, lo, hi, _ in ZONES],
             "names": NAMES, "colors": COLORS, "order": ORDER, "days": WEEKDAYS,
-            "repo": config.get("repo", "")}
+            "repo": config.get("repo", ""), "version": d["version"],
+            "planDays": d["plan_days"], "maxhrSet": d["max_hr"],
+            "planStart": d["plan_start"].isoformat()}
     # "</" is escaped so a run named "</script>" cannot break out of the tag
     blob = lambda obj: json.dumps(obj, separators=(",", ":")).replace("</", "<\\/")
     data = (f'<script>window.CONF={blob(conf)};window.RUNS={blob(runs_payload(d))};'
@@ -1948,6 +2241,13 @@ def render(activities, config, details=None, notes=None):
 <link rel="icon" href="icon.png">
 <link rel="apple-touch-icon" href="icon.png">
 <title>Training Dashboard</title>
+<script>
+  // apply the saved appearance before anything is painted, so there is no flash
+  try {{
+    var t = localStorage.getItem('pref-theme');
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  }} catch (e) {{}}
+</script>
 <style>{CSS}</style></head>
 <body>
 <nav class="tabs" aria-label="Sections"><span class="brand">Trening</span>{nav}</nav>
