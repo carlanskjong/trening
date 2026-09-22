@@ -2,5 +2,10 @@
   "client_id": "281348",
   "max_hr": 205,
   "plan_start": "2026-09-28",
-  "timezone": "Europe/Oslo"
+  "timezone": "Europe/Oslo",
+  "plan_days": {
+    "threshold": 1,
+    "easy": 3,
+    "long": 6
+  }
 }

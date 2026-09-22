@@ -18,8 +18,13 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
 - `build_site.py` – run by GitHub Actions. Refreshes the Strava token, fetches the last 140 days of activities,
   renders HTML via `report.py`, **encrypts it with AES-GCM (PBKDF2-SHA256, 250k rounds)** using `DASHBOARD_PASSWORD`,
   and writes `site/` (index.html login shell + manifest + icon). The browser decrypts with WebCrypto.
-- `report.py` – all dashboard HTML/CSS/SVG (single page today). Charts are hand-built inline SVG.
-- `config.json` – client_id (281348), max_hr, plan_start, timezone.
+- `report.py` – all dashboard HTML/CSS/SVG. It renders **one file containing four pages** – Home, Plan, Runs,
+  Progress – plus the menu (bottom tab bar on a phone, sidebar from 860px up). A tiny hash router (`#/home`,
+  `#/plan`, …) shows one `<section class="page">` at a time, so switching pages needs no network. The file is in
+  five marked parts: settings/helpers, the plan logic, charts (hand-built inline SVG), the four pages, and the
+  shell (CSS + router). Public API used by `build_site.py`: `render(activities, config)` and `RUN_TYPES`.
+- `config.json` – client_id (281348), max_hr, plan_start, timezone, plan_days
+  (which weekday each session lands on: Monday = 0, default threshold Tue, easy Thu, long run Sun).
 - `.github/workflows/update.yml` – runs hourly (cron `17 * * * *`), on manual dispatch, and on push to main.
   Deploys to GitHub Pages (Source: GitHub Actions). Commits `token.enc` when Strava rotates the refresh token,
   plus an empty keep-alive commit if the repo is idle > 40 days (scheduled workflows stop after 60 idle days).
@@ -30,9 +35,11 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
 ## Testing without Strava access
 You don't have the secrets. Test with sample data:
 ```
+python make_sample.py                       # writes sample_activities.json (fake runs, ~20 weeks)
 MOCK_ACTIVITIES=sample_activities.json DASHBOARD_PASSWORD=test1234 python build_site.py
 ```
-Create a realistic `sample_activities.json` (Strava `/athlete/activities` format) if none exists. Open `site/index.html`
+`make_sample.py` generates the `/athlete/activities` format. To check a different week state, call
+`report.render(activities, config)` directly with `config["today"]` set to another date. Open `site/index.html`
 through a local HTTP server (WebCrypto needs a secure context: localhost is fine) and check **phone width (390px) and desktop**.
 Never commit `site/`, sample data with real personal data, or any secret. Add a `.gitignore` for `site/` and `__pycache__/`.
 
@@ -43,14 +50,17 @@ Never commit `site/`, sample data with real personal data, or any secret. Add a 
 - After changes, push to `main` (or open a PR he can merge) – that triggers a rebuild and deploy. Tell him what changed in 1–3 lines.
 
 ## Roadmap (requested 22.09.2026)
-Restructure into a **front page + menu** (bottom tab bar on phone, sidebar/top nav on desktop):
-1. **Home** – only the most valuable info: today's / next session, this week's schedule with ticks, 2–3 key numbers,
-   latest run with a short coach comment.
-2. **Plan** – editable training plan + calendar/schedule view (week and month).
-3. **Runs** – list of past runs; per-run page with map (Leaflet + OpenStreetMap tiles, from `summary_polyline`),
-   HR/pace charts and laps (Strava streams + laps API, cached), zone breakdown, and **personal notes he can write and save**.
-4. **Progress** – trends and comparisons: weekly volume, time in zones, pace at easy HR (aerobic efficiency),
-   threshold-session pace at the same HR over time, best efforts (e.g. 1k/5k/10k), run-vs-run comparison.
+The **front page + menu** structure is built (22.09.2026): tab bar / sidebar, hash router, and all four pages exist.
+What each page holds now, and what is still missing:
+1. **Home** – done: next/today's session with HR target, week strip with ticks, three key numbers,
+   latest run with a coach comment.
+2. **Plan** – shows this week's three sessions (ticked when done), the threshold progression with "you are here",
+   the next five weeks and the HR zones. **Still to do: editing the plan, and a month calendar view.**
+3. **Runs** – list of past runs grouped by month. **Still to do: a per-run page** with map (Leaflet +
+   OpenStreetMap tiles, from `summary_polyline`), HR/pace charts and laps (Strava streams + laps API, cached),
+   zone breakdown, and **personal notes he can write and save**.
+4. **Progress** – weekly volume, time in zones, easy pace at easy HR, threshold-session pace over time.
+   **Still to do: best efforts (1k/5k/10k) and run-vs-run comparison.**
 Suggested extras: Settings (max HR, zones, plan start), shoe mileage, race goal + predicted time.
 
 **Open design question – saving notes/plan edits (must be free and sync phone ↔ PC):**
