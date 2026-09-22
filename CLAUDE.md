@@ -41,6 +41,15 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   Deploys to GitHub Pages (Source: GitHub Actions). Commits `token.enc` when Strava rotates the refresh token,
   plus an empty keep-alive commit if the repo is idle > 40 days (scheduled workflows stop after 60 idle days).
 - `token.enc` – latest Strava refresh token, AES-encrypted with a key derived from `STRAVA_CLIENT_SECRET`. Never commit it in plaintext.
+- `notes.enc` – his own notes per run, `{activity id: {text, updated}}`, AES-encrypted with the **dashboard
+  password** (same PBKDF2/AES-GCM scheme as the page). Written **from the browser**: the login shell hands the
+  password to the dashboard in `sessionStorage`, so it can decrypt and re-encrypt the file itself.
+  Reading needs no token (the file is public, just unreadable) – the page pulls it from
+  `raw.githubusercontent.com` on opening a run, so a note written on the phone reaches the PC without waiting
+  for a rebuild. Writing uses the GitHub Contents API with a **fine-grained PAT** (this repo only, Contents
+  read/write) pasted once per device into the notes card and kept in that browser's `localStorage`.
+  Every save also goes to `localStorage` first, so a note is never lost when there is no token or no signal.
+  A push triggers the normal rebuild, which bakes the note into the page.
 - GitHub secrets (do not rename): `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`, `DASHBOARD_PASSWORD`.
 - Live site: `https://<username>.github.io/trening/` – added to phone home screen as a web app.
 
@@ -72,15 +81,25 @@ What each page holds now, and what is still missing:
    latest run with a coach comment.
 2. **Plan** – shows this week's three sessions (ticked when done), the threshold progression with "you are here",
    the next five weeks and the HR zones. **Still to do: editing the plan, and a month calendar view.**
-3. **Runs** – list of past runs grouped by month, each opening a **run page** (`#/run/<id>`) with the route on
-   an OpenStreetMap background, stats, heart-rate/pace/elevation charts with a scrubber, laps (threshold reps
-   highlighted), kilometre splits and a true time-in-zones breakdown. **Still to do: personal notes he can
-   write and save** (see the open design question below).
+3. **Runs** – done: list grouped by month, each opening a **run page** (`#/run/<id>`) with a draggable,
+   zoomable map (Map / Terrain / Satellite), stats, heart-rate/pace/elevation charts that pop out and zoom,
+   laps (threshold reps highlighted), kilometre splits, a true time-in-zones breakdown, and **his own notes**
+   that sync between devices.
 4. **Progress** – weekly volume, time in zones, easy pace at easy HR, threshold-session pace over time.
    **Still to do: best efforts (1k/5k/10k) and run-vs-run comparison.**
-Suggested extras: Settings (max HR, zones, plan start), shoe mileage, race goal + predicted time.
+**Asked for on 22.09.2026, not built yet:**
+5. **Map page in the menu** – a full-screen map to move around in, showing more than one run, plus a
+   **heat map** of where he runs most often. `SlippyMap` is already reusable; it needs a route layer that can
+   draw many polylines and count overlaps.
+6. **Settings page** – so far one setting: light / dark / **follow system** (system is the default today, via
+   `prefers-color-scheme`). A theme choice needs a `data-theme` attribute on `<html>` and CSS that honours it.
+   When it exists, move the GitHub token field there from the notes card. Later: max HR, zones, plan start.
+7. **A real installable app** – he is toying with making this an actual app rather than a home-screen web page.
+   Worth checking what stays free: a proper PWA (installable, offline, free) or an Android build via
+   TWA/Bubblewrap is free; the Apple developer programme is not, so iOS is out under the no-paid-services rule.
 
-**Open design question – saving notes/plan edits (must be free and sync phone ↔ PC):**
-Proposed: store user data as an encrypted JSON file in the repo, written from the browser via the GitHub API using a
-fine-grained personal access token (this repo only, Contents read/write) that he pastes once per device (kept in localStorage).
-Saving triggers a rebuild. Discuss with him before building; explain the token step click-by-click.
+Other ideas not yet asked for: shoe mileage, race goal + predicted time, best efforts, run-vs-run comparison.
+
+**Saving user data (settled 22.09.2026):** encrypted JSON file in the repo, written from the browser via the
+GitHub API with a fine-grained PAT kept in `localStorage` per device – see `notes.enc` above. Reuse exactly this
+pattern for plan edits and settings; the encryption helpers already live in `RUN_VIEW`'s notes section.

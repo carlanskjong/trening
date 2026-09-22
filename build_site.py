@@ -30,6 +30,7 @@ import strava_cache
 ROOT = Path(__file__).resolve().parent
 SITE = ROOT / "site"
 TOKEN_FILE = ROOT / "token.enc"
+NOTES_FILE = ROOT / "notes.enc"
 DAYS_BACK = 140
 PBKDF2_ROUNDS = 250_000
 b64 = lambda b: base64.b64encode(b).decode()
@@ -110,6 +111,29 @@ def encrypt_page(html, password):
     return {"salt": b64(salt), "iv": b64(iv), "data": b64(data), "rounds": PBKDF2_ROUNDS}
 
 
+def load_notes(password):
+    """
+    Your own notes about runs, written in the browser and saved back to this repo by
+    the GitHub API. The file is encrypted with the dashboard password (same scheme as
+    the page itself), because the repo is public. A broken or missing file must never
+    fail the build - worst case the dashboard opens with no notes.
+    """
+    if not NOTES_FILE.exists():
+        return {}
+    try:
+        blob = json.loads(NOTES_FILE.read_text(encoding="utf-8"))
+        key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                         salt=base64.b64decode(blob["salt"]),
+                         iterations=int(blob["rounds"])).derive(password.encode())
+        plain = AESGCM(key).decrypt(base64.b64decode(blob["iv"]),
+                                    base64.b64decode(blob["data"]), None)
+        notes = json.loads(plain)
+        return notes if isinstance(notes, dict) else {}
+    except Exception as e:
+        print(f"::warning::Could not read notes.enc ({e}). Building without notes.")
+        return {}
+
+
 SHELL = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -153,15 +177,21 @@ async function unlock(pw) {
   const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv:bytes(PAYLOAD.iv)}, key, bytes(PAYLOAD.data));
   return new TextDecoder().decode(plain);
 }
-function show(html) { document.open(); document.write(html); document.close(); }
+let pwUsed = '';
+function show(html) {
+  // the dashboard re-uses the password to read and write your notes file
+  try { sessionStorage.setItem('dash-pw', pwUsed); } catch (e) {}
+  document.open(); document.write(html); document.close();
+}
 const store = { get(){ try { return localStorage.getItem('dash-pw'); } catch(e) { return null; } },
   set(v){ try { localStorage.setItem('dash-pw', v); } catch(e) {} }, clear(){ try { localStorage.removeItem('dash-pw'); } catch(e) {} } };
-(async () => { const saved = store.get(); if (saved) { try { show(await unlock(saved)); } catch(e) { store.clear(); } } })();
+(async () => { const saved = store.get();
+  if (saved) { try { const html = await unlock(saved); pwUsed = saved; show(html); } catch(e) { store.clear(); } } })();
 document.getElementById('f').addEventListener('submit', async e => {
   e.preventDefault();
   const pw = document.getElementById('pw').value, btn = document.getElementById('go');
   btn.disabled = true; btn.textContent = 'Opening…'; document.getElementById('err').textContent = '';
-  try { const html = await unlock(pw); if (document.getElementById('remember').checked) store.set(pw); show(html); }
+  try { const html = await unlock(pw); if (document.getElementById('remember').checked) store.set(pw); pwUsed = pw; show(html); }
   catch(err) { document.getElementById('err').textContent = 'Wrong password, try again.'; btn.disabled = false; btn.textContent = 'Open'; }
 });
 </script>
@@ -206,7 +236,8 @@ def main():
     tz = ZoneInfo(config.get("timezone", "Europe/Oslo"))
     now = datetime.now(tz)
     config["updated"], config["today"] = now.strftime("%d.%m.%Y %H:%M"), now.date().isoformat()
-    write_site(report.render(activities, config, details), password)
+    config["repo"] = os.environ.get("GITHUB_REPOSITORY") or config.get("repo", "")
+    write_site(report.render(activities, config, details, load_notes(password)), password)
     runs = sum(1 for a in activities if a.get("sport_type", a.get("type")) in report.RUN_TYPES)
     print(f"Built dashboard: {len(activities)} activities, {runs} runs in the last {DAYS_BACK} days.")
 

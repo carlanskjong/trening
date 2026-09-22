@@ -752,20 +752,70 @@ h3 { font-size:19px; margin:0 0 6px; letter-spacing:-.01em; }
 .back { display:inline-block; font-size:14px; font-weight:500; text-decoration:none; margin:0 0 10px; }
 .runtitle { font-size:22px; margin:0 0 2px; }
 .card.nopad { padding:0; overflow:hidden; }
-.map { position:relative; width:100%; overflow:hidden; background:var(--grid); }
+.mapwrap { height:215px; }
+.map { position:relative; width:100%; min-height:140px; overflow:hidden; background:var(--grid);
+  touch-action:none; cursor:grab; user-select:none; }
+.map.grabbing { cursor:grabbing; }
+.mapctl, .mapzoom { position:absolute; z-index:2; display:flex; gap:4px; }
+.mapctl { left:8px; top:8px; }
+.mapzoom { right:8px; top:8px; flex-direction:column; }
+.mapctl button, .mapzoom button, .mapbig {
+  font:inherit; font-size:12px; font-weight:500; line-height:1; padding:6px 9px; border-radius:7px;
+  border:1px solid var(--ring); background:var(--surface); color:var(--ink); cursor:pointer;
+  box-shadow:0 1px 3px rgba(0,0,0,.18); }
+.mapzoom button { width:30px; height:30px; font-size:16px; padding:0; }
+.mapctl button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+.mapbig { position:absolute; z-index:2; right:8px; bottom:20px; }
 .maptiles { position:absolute; inset:0; }
 img.maptile { position:absolute; width:256px; height:256px; }
 svg.route { position:absolute; inset:0; width:100%; height:100%; }
 .routeline { fill:none; stroke:#e8462a; stroke-width:4; stroke-linejoin:round; stroke-linecap:round; opacity:.92; }
 .startdot { fill:#fff; stroke:#e8462a; stroke-width:3; }
-.attrib { position:absolute; right:3px; bottom:2px; font-size:10px; color:#333;
-  background:rgba(255,255,255,.72); padding:0 4px; border-radius:3px; }
+.attrib { position:absolute; left:3px; bottom:2px; z-index:2; font-size:10px; color:#333;
+  background:rgba(255,255,255,.72); padding:0 4px; border-radius:3px; pointer-events:none; }
 .stats { display:grid; grid-template-columns:repeat(4,1fr); }
 .stats div { padding:11px 6px; text-align:center; box-shadow:inset -1px -1px 0 var(--ring); }
 .stats .m { display:block; font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
 .stats .u { font-size:11px; color:var(--muted); }
 .readout { margin:0 0 10px; font-size:13px; color:var(--ink2); min-height:20px;
   font-variant-numeric:tabular-nums; }
+h2 .more { font:inherit; font-size:13px; font-weight:500; color:var(--accent); background:none;
+  border:0; padding:0; cursor:pointer; margin-left:auto; }
+.charts { cursor:zoom-in; }
+.clabel i { font-style:normal; color:var(--axis); }
+
+/* ---- pop-out sheet ---- */
+body.noscroll { overflow:hidden; }
+.sheet { position:fixed; inset:0; z-index:30; background:rgba(0,0,0,.45); display:flex;
+  align-items:center; justify-content:center; padding:0; }
+.sheetbox { background:var(--page); width:100%; height:100%; display:flex; flex-direction:column; }
+.sheethead { display:flex; align-items:center; gap:10px; padding:12px 16px;
+  border-bottom:1px solid var(--ring); background:var(--surface); }
+.sheetclose { margin-left:auto; font:inherit; font-size:17px; line-height:1; padding:6px 10px;
+  border:1px solid var(--ring); border-radius:8px; background:var(--page); color:var(--ink); cursor:pointer; }
+.sheetbody { padding:16px; overflow:auto; flex:1; }
+.bigmap { height:min(70vh,560px); border-radius:12px; overflow:hidden; border:1px solid var(--ring); }
+.zoombar { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 6px; position:sticky; top:-16px;
+  z-index:2; background:var(--page); padding:4px 0 8px; }
+.zoombar button { font:inherit; font-size:14px; padding:9px 14px; border-radius:9px;
+  border:1px solid var(--ring); background:var(--surface); color:var(--ink); cursor:pointer; }
+.zoombar button:hover { background:var(--raise); }
+@media (min-width:860px) {
+  .sheet { padding:24px; }
+  .sheetbox { max-width:1000px; max-height:92vh; height:auto; border-radius:16px; overflow:hidden; }
+}
+
+/* ---- notes ---- */
+#notetext, #ghtoken { width:100%; font:inherit; font-size:15px; padding:10px 12px; border-radius:10px;
+  border:1px solid var(--ring); background:var(--page); color:var(--ink); resize:vertical; }
+.noterow { display:flex; align-items:center; gap:10px; margin-top:10px; flex-wrap:wrap; }
+.noterow button { font:inherit; font-weight:600; font-size:14px; padding:9px 16px; border:0;
+  border-radius:9px; background:var(--accent); color:#fff; cursor:pointer; }
+.noterow button:disabled { opacity:.6; }
+.noterow .hint { margin:0; flex:1; min-width:140px; }
+.tokenbox { margin-top:14px; border-top:1px solid var(--grid); padding-top:10px; }
+.tokenbox summary { font-size:13px; color:var(--accent); cursor:pointer; }
+.tokenbox .noterow input { flex:1; min-width:180px; }
 .charts { display:grid; gap:14px; }
 .chartbox { position:relative; }
 .clabel { font-size:12px; color:var(--muted); }
@@ -838,6 +888,14 @@ td.wrap { min-width:150px; }
   .rnums { padding-left:0; gap:12px; }
   .tick { font-size:22px; }
   .stats { grid-template-columns:repeat(3,1fr); }
+  .sheetbody { padding:12px; }
+  .zoombar { top:-12px; gap:6px; }
+  .zoombar button[data-act="in"], .zoombar button[data-act="out"] { flex:1 1 calc(50% - 3px); }
+  .zoombar button[data-act="left"], .zoombar button[data-act="right"] { flex:0 0 58px; }
+  .zoombar button[data-act="reset"] { flex:1; }
+  .mapctl button { font-size:11px; padding:5px 7px; }
+  .mapctl { gap:3px; left:6px; top:6px; }
+  .zoombar button { flex:1; min-width:calc(50% - 4px); }
   .stats .m { font-size:15px; }
   .split .sp { width:40px; }
 }
@@ -861,7 +919,7 @@ td.wrap { min-width:150px; }
 }
 """
 
-RUN_VIEW = """
+RUN_VIEW = r"""
 (function () {
   var runs = window.RUNS || [], conf = window.CONF || {}, byId = {};
   runs.forEach(function (r) { byId[r.id] = r; });
@@ -892,8 +950,7 @@ RUN_VIEW = """
     return conf.days[(d.getDay() + 6) % 7] + ' ' + pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' +
       d.getFullYear() + ' · ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
-
-  // ---------- the route, drawn on OpenStreetMap tiles ----------
+  // ---------- the route, on a map you can drag and zoom ----------
   function decodePoly(str) {
     var pts = [], i = 0, lat = 0, lng = 0, b, shift, result;
     while (i < str.length) {
@@ -907,48 +964,217 @@ RUN_VIEW = """
     }
     return pts;
   }
-  function project(lat, lng, z) {          // standard web-mercator tile coordinates
+  function project(lat, lng, z) {            // web mercator, in tile units
     var n = Math.pow(2, z), s = Math.sin(lat * Math.PI / 180);
     return [(lng + 180) / 360 * n, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n];
   }
-  function mapHTML(poly, w, h) {
-    var pts = poly ? decodePoly(poly) : [];
-    if (pts.length < 2) return '';
-    var pad = 18, z, i, p, xs, ys;
-    for (z = 16; z > 2; z--) {             // biggest zoom where the whole route still fits
+
+  var LAYERS = [
+    { id: 'map', name: 'Map', max: 19, attrib: '© OpenStreetMap',
+      url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' },
+    { id: 'terrain', name: 'Terrain', max: 17, attrib: '© OpenTopoMap (CC-BY-SA)', subs: ['a', 'b', 'c'],
+      url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png' },
+    { id: 'satellite', name: 'Satellite', max: 19, attrib: 'Imagery © Esri',
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}' }
+  ];
+  function layerById(id) {
+    for (var i = 0; i < LAYERS.length; i++) if (LAYERS[i].id === id) return LAYERS[i];
+    return LAYERS[0];
+  }
+  var savedLayer = (function () {
+    try { return localStorage.getItem('dash-layer') || 'map'; } catch (e) { return 'map'; }
+  })();
+
+  // A small slippy map: tiles in a layer that we move, with the route drawn over it.
+  // Written by hand so the dashboard needs no third-party JavaScript.
+  function SlippyMap(el, points, opts) {
+    opts = opts || {};
+    var self = this;
+    this.el = el;
+    this.pts = points || [];
+    this.layer = layerById(savedLayer);
+    this.z = 14; this.cx = 0; this.cy = 0;          // centre, in pixels at zoom z
+    el.classList.add('map');
+    el.innerHTML = '<div class="maptiles"></div>' +
+      '<svg class="route" preserveAspectRatio="none"><polyline class="routeline"/>' +
+      '<circle class="startdot" r="5"/></svg>' +
+      '<div class="mapctl">' +
+      LAYERS.map(function (l) {
+        return '<button type="button" data-layer="' + l.id + '">' + l.name + '</button>';
+      }).join('') + '</div>' +
+      '<div class="mapzoom"><button type="button" data-zoom="1">+</button>' +
+      '<button type="button" data-zoom="-1">−</button></div>' +
+      (opts.expand ? '<button type="button" class="mapbig" title="Bigger">⤢</button>' : '') +
+      '<span class="attrib"></span>';
+    this.tiles = el.querySelector('.maptiles');
+    this.svg = el.querySelector('.route');
+    this.line = el.querySelector('.routeline');
+    this.dot = el.querySelector('.startdot');
+    this.attrib = el.querySelector('.attrib');
+    this.fit();
+    this.bind(opts);
+  }
+
+  SlippyMap.prototype.size = function () {
+    return [this.el.clientWidth || 320, this.el.clientHeight || 200];
+  };
+
+  SlippyMap.prototype.fit = function () {
+    var s = this.size(), w = s[0], h = s[1], pad = 24, z, i, p, xs, ys;
+    if (!this.pts.length) { this.render(); return; }
+    for (z = this.layer.max; z > 2; z--) {
       xs = []; ys = [];
-      for (i = 0; i < pts.length; i++) { p = project(pts[i][0], pts[i][1], z); xs.push(p[0]); ys.push(p[1]); }
+      for (i = 0; i < this.pts.length; i++) {
+        p = project(this.pts[i][0], this.pts[i][1], z); xs.push(p[0]); ys.push(p[1]);
+      }
       if ((Math.max.apply(null, xs) - Math.min.apply(null, xs)) * 256 <= w - 2 * pad &&
           (Math.max.apply(null, ys) - Math.min.apply(null, ys)) * 256 <= h - 2 * pad) break;
     }
-    var minX = Math.min.apply(null, xs), maxX = Math.max.apply(null, xs);
-    var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
-    // pixel offset that centres the route in the box
-    var offX = (w - (maxX - minX) * 256) / 2 - minX * 256;
-    var offY = (h - (maxY - minY) * 256) / 2 - minY * 256;
-    var n = Math.pow(2, z), tiles = '';
-    var tx0 = Math.floor(-offX / 256), tx1 = Math.floor((w - offX) / 256);
-    var ty0 = Math.floor(-offY / 256), ty1 = Math.floor((h - offY) / 256);
-    for (var tx = tx0; tx <= tx1; tx++) {
-      for (var ty = ty0; ty <= ty1; ty++) {
-        if (ty < 0 || ty >= n) continue;
-        var wx = ((tx % n) + n) % n;
-        tiles += '<img class="maptile" alt="" onerror="this.remove()" src="https://tile.openstreetmap.org/' +
-          z + '/' + wx + '/' + ty + '.png" style="left:' + Math.round(tx * 256 + offX) +
-          'px;top:' + Math.round(ty * 256 + offY) + 'px">';
+    this.z = z;
+    this.cx = (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2 * 256;
+    this.cy = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2 * 256;
+    this.render();
+  };
+
+  SlippyMap.prototype.tileUrl = function (x, y, z) {
+    var n = Math.pow(2, z), wx = ((x % n) + n) % n;
+    return this.layer.url.replace('{z}', z).replace('{x}', wx).replace('{y}', y)
+      .replace('{s}', this.layer.subs ? this.layer.subs[(wx + y) % this.layer.subs.length] : 'a');
+  };
+
+  SlippyMap.prototype.render = function () {
+    var s = this.size(), w = s[0], h = s[1];
+    var left = this.cx - w / 2, top = this.cy - h / 2, n = Math.pow(2, this.z);
+    var x0 = Math.floor(left / 256), x1 = Math.floor((left + w) / 256);
+    var y0 = Math.floor(top / 256), y1 = Math.floor((top + h) / 256);
+    var html = '', x, y;
+    for (x = x0; x <= x1; x++) {
+      for (y = Math.max(y0, 0); y <= Math.min(y1, n - 1); y++) {
+        html += '<img class="maptile" alt="" onerror="this.style.visibility=\'hidden\'" src="' +
+          this.tileUrl(x, y, this.z) + '" style="left:' + Math.round(x * 256 - left) +
+          'px;top:' + Math.round(y * 256 - top) + 'px">';
       }
     }
-    var line = '';
-    for (i = 0; i < xs.length; i++) line += (xs[i] * 256 + offX).toFixed(1) + ',' + (ys[i] * 256 + offY).toFixed(1) + ' ';
-    return '<div class="map" style="height:' + h + 'px">' +
-      '<div class="maptiles">' + tiles + '</div>' +
-      '<svg class="route" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
-      '<polyline points="' + line + '" class="routeline"/>' +
-      '<circle cx="' + (xs[0] * 256 + offX).toFixed(1) + '" cy="' + (ys[0] * 256 + offY).toFixed(1) +
-      '" r="5" class="startdot"/></svg>' +
-      '<span class="attrib">© OpenStreetMap</span></div>';
-  }
+    this.tiles.innerHTML = html;
+    this.tiles.style.transform = '';
+    this.attrib.textContent = this.layer.attrib;
+    this.svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    var line = '', p;
+    for (var i = 0; i < this.pts.length; i++) {
+      p = project(this.pts[i][0], this.pts[i][1], this.z);
+      line += (p[0] * 256 - left).toFixed(1) + ',' + (p[1] * 256 - top).toFixed(1) + ' ';
+    }
+    this.line.setAttribute('points', line);
+    if (this.pts.length) {
+      p = project(this.pts[0][0], this.pts[0][1], this.z);
+      this.dot.setAttribute('cx', (p[0] * 256 - left).toFixed(1));
+      this.dot.setAttribute('cy', (p[1] * 256 - top).toFixed(1));
+      this.dot.style.display = '';
+    } else {
+      this.dot.style.display = 'none';
+    }
+    var ctl = this.el.querySelectorAll('.mapctl button');
+    for (var c = 0; c < ctl.length; c++) {
+      ctl[c].classList.toggle('on', ctl[c].dataset.layer === this.layer.id);
+    }
+  };
 
+  SlippyMap.prototype.zoomBy = function (step, ax, ay) {
+    var s = this.size(), z = Math.max(3, Math.min(this.layer.max, this.z + step));
+    if (z === this.z) return;
+    // keep the point under the cursor (or the centre) where it is
+    ax = ax == null ? s[0] / 2 : ax; ay = ay == null ? s[1] / 2 : ay;
+    var wx = this.cx - s[0] / 2 + ax, wy = this.cy - s[1] / 2 + ay;
+    var k = Math.pow(2, z - this.z);
+    this.cx = wx * k - (ax - s[0] / 2); this.cy = wy * k - (ay - s[1] / 2);
+    this.z = z;
+    this.render();
+  };
+
+  SlippyMap.prototype.setLayer = function (id) {
+    var was = this.layer;
+    this.layer = layerById(id);
+    try { localStorage.setItem('dash-layer', id); } catch (e) {}
+    savedLayer = id;
+    if (this.z > this.layer.max) this.zoomBy(this.layer.max - this.z);
+    else this.render();
+    if (was !== this.layer) this.render();
+  };
+
+  SlippyMap.prototype.bind = function (opts) {
+    var self = this, el = this.el, drag = null, pinch = null;
+    el.addEventListener('pointerdown', function (e) {
+      if (e.target.closest('button')) return;
+      drag = { x: e.clientX, y: e.clientY, moved: 0 };
+      el.setPointerCapture(e.pointerId);
+      el.classList.add('grabbing');
+    });
+    el.addEventListener('pointermove', function (e) {
+      if (!drag || pinch) return;
+      var dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.moved += Math.abs(dx) + Math.abs(dy);
+      drag.x = e.clientX; drag.y = e.clientY;
+      self.cx -= dx; self.cy -= dy;
+      self.render();
+    });
+    function endDrag(e) {
+      if (!drag) return;
+      drag = null;
+      el.classList.remove('grabbing');
+      try { el.releasePointerCapture(e.pointerId); } catch (err) {}
+    }
+    el.addEventListener('pointerup', endDrag);
+    el.addEventListener('pointercancel', endDrag);
+    el.addEventListener('wheel', function (e) {
+      e.preventDefault();
+      var r = el.getBoundingClientRect();
+      self.zoomBy(e.deltaY < 0 ? 1 : -1, e.clientX - r.left, e.clientY - r.top);
+    }, { passive: false });
+    el.addEventListener('dblclick', function (e) {
+      var r = el.getBoundingClientRect();
+      self.zoomBy(1, e.clientX - r.left, e.clientY - r.top);
+    });
+    // two-finger pinch: scale the tiles live, then settle on a whole zoom step
+    el.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 2) return;
+      drag = null;
+      var r = el.getBoundingClientRect();
+      pinch = {
+        d: Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                      e.touches[0].clientY - e.touches[1].clientY),
+        x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
+        y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top
+      };
+    }, { passive: true });
+    el.addEventListener('touchmove', function (e) {
+      if (!pinch || e.touches.length !== 2) return;
+      e.preventDefault();
+      var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                         e.touches[0].clientY - e.touches[1].clientY);
+      var k = d / pinch.d;
+      self.tiles.style.transformOrigin = pinch.x + 'px ' + pinch.y + 'px';
+      self.tiles.style.transform = 'scale(' + k + ')';
+      pinch.k = k;
+    }, { passive: false });
+    function endPinch() {
+      if (!pinch) return;
+      var step = Math.round(Math.log(pinch.k || 1) / Math.LN2);
+      var at = [pinch.x, pinch.y];
+      pinch = null;
+      self.tiles.style.transform = '';
+      if (step) self.zoomBy(step, at[0], at[1]); else self.render();
+    }
+    el.addEventListener('touchend', endPinch);
+    el.addEventListener('touchcancel', endPinch);
+    el.addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b) return;
+      e.preventDefault();
+      if (b.dataset.layer) self.setLayer(b.dataset.layer);
+      else if (b.dataset.zoom) self.zoomBy(+b.dataset.zoom);
+      else if (b.classList.contains('mapbig') && opts.expand) opts.expand();
+    });
+  };
   // ---------- charts ----------
   var W = 760;
   function smooth(values) {
@@ -963,6 +1189,11 @@ RUN_VIEW = """
     if (!v.length) return null;
     return v[Math.min(v.length - 1, Math.max(0, Math.round((v.length - 1) * p)))];
   }
+
+  /*
+   * One chart. `invert` puts small values at the top, which is what pace wants:
+   * a peak then means fast and a valley means slow, the way it reads on a watch.
+   */
   function chart(ys, opts) {
     var H = opts.height, top = 10, bottom = 18, left = 66;
     var plotH = H - top - bottom, plotW = W - left - 8;
@@ -970,14 +1201,18 @@ RUN_VIEW = """
     if (clean.length < 2) return '';
     var lo = opts.lo != null ? opts.lo : Math.min.apply(null, clean);
     var hi = opts.hi != null ? opts.hi : Math.max.apply(null, clean);
-    if (hi - lo < 1e-6) { hi = lo + 1; }
+    if (hi - lo < 1e-6) hi = lo + 1;
     var span = (hi - lo) * 1.12, mid = (hi + lo) / 2;
     lo = mid - span / 2; hi = mid + span / 2;
-    var x = function (i) { return left + plotW * i / (ys.length - 1); };
-    var y = function (v) { return top + plotH - (v - lo) / (hi - lo) * plotH; };
+    var x = function (i) { return left + plotW * i / Math.max(ys.length - 1, 1); };
+    var y = function (v) {
+      var f = (v - lo) / (hi - lo);
+      return opts.invert ? top + f * plotH : top + plotH - f * plotH;
+    };
     var out = [];
-    (opts.bands || []).forEach(function (b) {                 // heart-rate zone bands
-      var y0 = y(Math.min(b.hi, hi)), y1 = y(Math.max(b.lo, lo));
+    (opts.bands || []).forEach(function (b) {
+      var a = y(Math.min(b.hi, hi)), c = y(Math.max(b.lo, lo));
+      var y0 = Math.min(a, c), y1 = Math.max(a, c);
       if (y1 - y0 > 1) out.push('<rect x="' + left + '" y="' + y0.toFixed(1) + '" width="' + plotW +
         '" height="' + (y1 - y0).toFixed(1) + '" class="band ' + b.cls + '"/>');
     });
@@ -990,8 +1225,8 @@ RUN_VIEW = """
     var d = '', started = false;
     for (var i = 0; i < ys.length; i++) {
       if (ys[i] == null) { started = false; continue; }
-      var v = Math.max(lo, Math.min(hi, ys[i]));          // keep spikes inside the box
-      d += (started ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1) + ' ';
+      var val = Math.max(lo, Math.min(hi, ys[i]));
+      d += (started ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(val).toFixed(1) + ' ';
       started = true;
     }
     if (opts.area) {
@@ -1000,18 +1235,353 @@ RUN_VIEW = """
     }
     out.push('<path d="' + d + '" class="cline ' + (opts.cls || '') + '"/>');
     out.push('<line class="cursor" x1="0" x2="0" y1="' + top + '" y2="' + (top + plotH) + '"/>');
-    return '<div class="chartbox"><span class="clabel">' + opts.label + '</span>' +
+    return '<div class="chartbox" data-kind="' + (opts.kind || '') + '">' +
+      '<span class="clabel">' + opts.label + (opts.hint ? ' <i>' + opts.hint + '</i>' : '') + '</span>' +
       '<svg viewBox="0 0 ' + W + ' ' + H + '" class="cchart" data-left="' + left +
       '" data-right="' + (left + plotW) + '" role="img" aria-label="' + opts.label + '">' +
       out.join('') + '</svg></div>';
   }
 
-  // ---------- the page ----------
-  function mapBox(run) {
-    var w = Math.max(240, Math.round(host.clientWidth));
-    return mapHTML(run.poly, w, Math.round(Math.min(340, Math.max(190, w * 0.6))));
+  // The three series of a run, optionally only the slice [i0, i1) of it.
+  function seriesFor(run, i0, i1) {
+    var slice = function (a) { return (a || []).slice(i0, i1); };
+    var pc = slice(run.sp).map(function (v) { return v && v > 40 ? 100000 / v : null; });
+    return { hr: slice(run.hs), pace: smooth(pc), alt: slice(run.al), dist: slice(run.d), time: slice(run.t) };
   }
 
+  function chartsHTML(run, i0, i1, big) {
+    var s = seriesFor(run, i0, i1);
+    var bands = conf.zones.map(function (z) {
+      return { lo: conf.maxhr * z[2] / 100, hi: conf.maxhr * z[3] / 100, cls: 'z' + z[0] };
+    });
+    var html = chart(s.hr, {
+      height: big ? 260 : 150, label: 'Heart rate (bpm)', cls: 'hr', kind: 'hr',
+      bands: bands, fmt: function (v) { return Math.round(v); }
+    });
+    if (s.pace.filter(function (v) { return v; }).length > 5) {
+      html += chart(s.pace, {
+        height: big ? 220 : 120, label: 'Pace (min/km)', hint: 'higher = faster', cls: 'pace',
+        kind: 'pace', fmt: pace, invert: true,
+        lo: percentile(s.pace, 0.02), hi: percentile(s.pace, 0.96)
+      });
+    }
+    if (s.alt.length) {
+      html += chart(s.alt, {
+        height: big ? 170 : 90, label: 'Elevation (m)', cls: 'elev', kind: 'elev', area: true,
+        fmt: function (v) { return Math.round(v) + ' m'; }
+      });
+    }
+    return html;
+  }
+
+  // The moving readout shared by every chart in a box.
+  function attachProbe(box, readout, run, i0) {
+    var charts = box.querySelectorAll('.cchart');
+    if (!charts.length) return;
+    var n = +box.dataset.count;
+    function at(clientX) {
+      var first = charts[0], rect = first.getBoundingClientRect();
+      var left = +first.dataset.left, right = +first.dataset.right;
+      var f = (clientX - rect.left) / rect.width * W;
+      f = (f - left) / (right - left);
+      var i = Math.max(0, Math.min(n - 1, Math.round(f * (n - 1))));
+      for (var c = 0; c < charts.length; c++) {
+        var cur = charts[c].querySelector('.cursor');
+        var px = left + (right - left) * i / Math.max(n - 1, 1);
+        cur.setAttribute('x1', px); cur.setAttribute('x2', px);
+        cur.style.opacity = 1;
+      }
+      var j = i0 + i;
+      var bits = [run.d && run.d[j] != null ? (run.d[j] / 1000).toFixed(2) + ' km' : null,
+        run.hs && run.hs[j] ? run.hs[j] + ' bpm' : null,
+        run.sp && run.sp[j] > 40 ? pace(100000 / run.sp[j]) + ' /km' : null,
+        run.t && run.t[j] != null ? hms(run.t[j]) : null,
+        run.al && run.al[j] != null ? Math.round(run.al[j]) + ' m' : null];
+      readout.textContent = bits.filter(Boolean).join('  ·  ');
+    }
+    function clear() {
+      readout.textContent = readout.dataset.idle;
+      for (var c = 0; c < charts.length; c++) charts[c].querySelector('.cursor').style.opacity = 0;
+    }
+    box.addEventListener('mousemove', function (e) { at(e.clientX); });
+    box.addEventListener('mouseleave', clear);
+    box.addEventListener('touchstart', function (e) { at(e.touches[0].clientX); }, { passive: true });
+    box.addEventListener('touchmove', function (e) { at(e.touches[0].clientX); }, { passive: true });
+  }
+
+  // ---------- pop-out ----------
+  function openSheet(title, bodyHTML, onMount) {
+    var back = document.createElement('div');
+    back.className = 'sheet';
+    back.innerHTML = '<div class="sheetbox" role="dialog" aria-modal="true" aria-label="' + title + '">' +
+      '<div class="sheethead"><b>' + title + '</b>' +
+      '<button type="button" class="sheetclose" aria-label="Close">✕</button></div>' +
+      '<div class="sheetbody"></div></div>';
+    back.querySelector('.sheetbody').innerHTML = bodyHTML;
+    document.body.appendChild(back);
+    document.body.classList.add('noscroll');
+    function close() {
+      back.remove();
+      document.body.classList.remove('noscroll');
+      document.removeEventListener('keydown', onKey);
+    }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey);
+    back.addEventListener('click', function (e) {
+      if (e.target === back || e.target.closest('.sheetclose')) close();
+    });
+    if (onMount) onMount(back.querySelector('.sheetbody'), close);
+    return close;
+  }
+
+  // Charts blown up, with a zoom window over the run you can widen or narrow.
+  function openCharts(run) {
+    var n = (run.hs || []).length;
+    if (!n) return;
+    var view = { i0: 0, i1: n };
+    openSheet(esc(run.n), '<div class="zoombar">' +
+      '<button type="button" data-act="in">Zoom in</button>' +
+      '<button type="button" data-act="out">Zoom out</button>' +
+      '<button type="button" data-act="left">◀</button>' +
+      '<button type="button" data-act="right">▶</button>' +
+      '<button type="button" data-act="reset">Whole run</button></div>' +
+      '<p class="hint" id="zoomrange"></p>' +
+      '<p class="readout" id="zoomout"></p><div class="charts" id="zoomcharts"></div>',
+    function (body) {
+      var box = body.querySelector('#zoomcharts'), out = body.querySelector('#zoomout');
+      out.dataset.idle = 'Move across the charts to read any point.';
+      function draw() {
+        view.i0 = Math.max(0, Math.round(view.i0));
+        view.i1 = Math.min(n, Math.round(view.i1));
+        if (view.i1 - view.i0 < 8) view.i1 = Math.min(n, view.i0 + 8);
+        box.innerHTML = chartsHTML(run, view.i0, view.i1, true);
+        box.dataset.count = view.i1 - view.i0;
+        out.textContent = out.dataset.idle;
+        var from = run.d && run.d[view.i0] != null ? (run.d[view.i0] / 1000).toFixed(2) : '0';
+        var to = run.d && run.d[view.i1 - 1] != null ? (run.d[view.i1 - 1] / 1000).toFixed(2) : '?';
+        body.querySelector('#zoomrange').textContent =
+          'Showing ' + from + ' km to ' + to + ' km of the run.';
+        attachProbe(box, out, run, view.i0);
+      }
+      function zoom(k) {                       // k < 1 zooms in, around the middle
+        var mid = (view.i0 + view.i1) / 2, half = (view.i1 - view.i0) * k / 2;
+        view.i0 = Math.max(0, mid - half); view.i1 = Math.min(n, mid + half);
+        draw();
+      }
+      function pan(dir) {
+        var span = view.i1 - view.i0, step = span * 0.35 * dir;
+        if (view.i0 + step < 0) step = -view.i0;
+        if (view.i1 + step > n) step = n - view.i1;
+        view.i0 += step; view.i1 += step;
+        draw();
+      }
+      body.addEventListener('click', function (e) {
+        var b = e.target.closest('button[data-act]');
+        if (!b) return;
+        var a = b.dataset.act;
+        if (a === 'in') zoom(0.5);
+        else if (a === 'out') zoom(2);
+        else if (a === 'left') pan(-1);
+        else if (a === 'right') pan(1);
+        else { view.i0 = 0; view.i1 = n; draw(); }
+      });
+      // pinch on the charts zooms the window too
+      var pinch = null;
+      box.addEventListener('touchstart', function (e) {
+        if (e.touches.length === 2) {
+          pinch = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                             e.touches[0].clientY - e.touches[1].clientY);
+        }
+      }, { passive: true });
+      box.addEventListener('touchend', function () {
+        if (!pinch) return;
+        pinch = null;
+      });
+      box.addEventListener('touchmove', function (e) {
+        if (!pinch || e.touches.length !== 2) return;
+        var d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                           e.touches[0].clientY - e.touches[1].clientY);
+        if (d / pinch > 1.6) { pinch = d; zoom(0.6); }
+        else if (d / pinch < 0.625) { pinch = d; zoom(1.7); }
+      }, { passive: true });
+      draw();
+    });
+  }
+  /* ----------------------------------------------------------------
+   * Notes
+   *
+   * A note lives in notes.enc in the repo, encrypted with the dashboard
+   * password - the repo is public, so nothing personal may sit there in the
+   * clear. The browser already knows the password (it just decrypted this
+   * page), so it can read and write that file itself.
+   *
+   * Reading needs nothing: notes.enc is public, just unreadable without the
+   * password. Writing needs a GitHub token, which is pasted once per device
+   * and kept in this browser only.
+   * ---------------------------------------------------------------- */
+  var NOTES = window.NOTES || {};
+  var notesSha = null, pulled = false;
+
+  var store = {
+    token: function (v) {
+      try {
+        if (v === undefined) return localStorage.getItem('gh-token') || '';
+        if (v) localStorage.setItem('gh-token', v); else localStorage.removeItem('gh-token');
+      } catch (e) {}
+      return v || '';
+    },
+    local: function (v) {
+      try {
+        if (v === undefined) return JSON.parse(localStorage.getItem('dash-notes') || '{}');
+        localStorage.setItem('dash-notes', JSON.stringify(v));
+      } catch (e) { return {}; }
+    },
+    password: function () {
+      try { return sessionStorage.getItem('dash-pw') || localStorage.getItem('dash-pw') || ''; }
+      catch (e) { return ''; }
+    }
+  };
+
+  function mergeNotes(into, from) {            // newest wins, per run
+    Object.keys(from || {}).forEach(function (k) {
+      if (!into[k] || (from[k].updated || '') > (into[k].updated || '')) into[k] = from[k];
+    });
+    return into;
+  }
+  mergeNotes(NOTES, store.local());
+
+  var b64 = {
+    enc: function (bytes) {
+      var s = '';
+      for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+      return btoa(s);
+    },
+    dec: function (str) { return Uint8Array.from(atob(str), function (c) { return c.charCodeAt(0); }); }
+  };
+  var ROUNDS = 250000;
+
+  async function keyFor(password, salt, rounds) {
+    var base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password),
+      'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt, iterations: rounds, hash: 'SHA-256' },
+      base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+  async function encryptNotes(obj, password) {
+    var salt = crypto.getRandomValues(new Uint8Array(16));
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    var key = await keyFor(password, salt, ROUNDS);
+    var data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key,
+      new TextEncoder().encode(JSON.stringify(obj)));
+    return JSON.stringify({ salt: b64.enc(salt), iv: b64.enc(iv),
+      data: b64.enc(new Uint8Array(data)), rounds: ROUNDS });
+  }
+  async function decryptNotes(text, password) {
+    var blob = JSON.parse(text);
+    var key = await keyFor(password, b64.dec(blob.salt), blob.rounds);
+    var plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.dec(blob.iv) }, key,
+      b64.dec(blob.data));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
+  // Pull the newest notes file straight from the repo - no token needed, so a
+  // note written on the phone shows up on the PC without waiting for a rebuild.
+  async function pullNotes() {
+    if (pulled || !conf.repo) return;
+    pulled = true;
+    var pw = store.password();
+    if (!pw) return;
+    try {
+      var r = await fetch('https://raw.githubusercontent.com/' + conf.repo + '/main/notes.enc',
+        { cache: 'no-store' });
+      if (!r.ok) return;
+      mergeNotes(NOTES, await decryptNotes(await r.text(), pw));
+    } catch (e) { /* offline, no file yet, or a different password - not fatal */ }
+  }
+
+  async function pushNotes() {
+    var token = store.token(), pw = store.password();
+    if (!token) return { ok: false, why: 'no-token' };
+    if (!pw) return { ok: false, why: 'no-password' };
+    if (!conf.repo) return { ok: false, why: 'no-repo' };
+    var api = 'https://api.github.com/repos/' + conf.repo + '/contents/notes.enc';
+    var head = { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' };
+    try {
+      if (notesSha === null) {                 // find the file's current version first
+        var get = await fetch(api + '?ref=main', { headers: head, cache: 'no-store' });
+        if (get.ok) notesSha = (await get.json()).sha;
+        else if (get.status === 404) notesSha = '';
+        else return { ok: false, why: get.status === 401 || get.status === 403 ? 'bad-token' : 'http' };
+      }
+      var body = { message: 'Save run notes', content: btoa(unescape(encodeURIComponent(
+        await encryptNotes(NOTES, pw)))), branch: 'main' };
+      if (notesSha) body.sha = notesSha;
+      var put = await fetch(api, { method: 'PUT', headers: head, body: JSON.stringify(body) });
+      if (put.status === 409 || put.status === 422) { notesSha = null; return { ok: false, why: 'conflict' }; }
+      if (!put.ok) return { ok: false, why: put.status === 401 || put.status === 403 ? 'bad-token' : 'http' };
+      notesSha = (await put.json()).content.sha;
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, why: 'offline' };
+    }
+  }
+
+  var WHY = {
+    'no-token': 'Saved on this device. Add a GitHub token below to sync it to your other devices.',
+    'no-password': 'Saved on this device only - reopen the dashboard with your password to sync.',
+    'no-repo': 'Saved on this device only - this build does not know which repo to write to.',
+    'bad-token': 'Saved on this device. GitHub refused the token - check it has Contents: read and write.',
+    'conflict': 'Saved on this device. The notes file changed elsewhere - press Save again.',
+    'offline': 'Saved on this device. No connection to GitHub right now - press Save again later.',
+    'http': 'Saved on this device. GitHub would not accept the change.'
+  };
+
+  function notesBlock(run) {
+    var note = NOTES[run.id] || {};
+    var hasToken = !!store.token();
+    return '<section class="card" id="notecard"><h2>Your notes</h2>' +
+      '<textarea id="notetext" rows="4" placeholder="How did it feel? Legs, weather, anything worth ' +
+      'remembering next time.">' + esc(note.text || '') + '</textarea>' +
+      '<div class="noterow"><button type="button" id="notesave">Save</button>' +
+      '<span id="notestatus" class="hint">' + (note.updated ? 'Last saved ' + esc(note.updated.slice(0, 16).replace('T', ' ')) : '') + '</span></div>' +
+      '<details class="tokenbox"' + (hasToken ? '' : '') + '><summary>' +
+      (hasToken ? 'Syncing is set up · change token' : 'Set up syncing between phone and PC') + '</summary>' +
+      '<p class="hint">Notes save on this device straight away. To have them appear on your other ' +
+      'devices too, paste a GitHub token here once per device. It is stored only in this browser.</p>' +
+      '<div class="noterow"><input type="password" id="ghtoken" placeholder="github_pat_..." ' +
+      'autocomplete="off"><button type="button" id="tokensave">Save token</button></div>' +
+      '<p class="hint" id="tokenstatus"></p></details></section>';
+  }
+
+  function wireNotes(run) {
+    var text = document.getElementById('notetext');
+    var status = document.getElementById('notestatus');
+    var saveBtn = document.getElementById('notesave');
+    if (!text) return;
+    saveBtn.addEventListener('click', async function () {
+      saveBtn.disabled = true;
+      status.textContent = 'Saving…';
+      var body = text.value.trim();
+      if (body) NOTES[run.id] = { text: body, updated: new Date().toISOString() };
+      else delete NOTES[run.id];
+      store.local(NOTES);                       // never lose it, whatever GitHub says
+      var res = await pushNotes();
+      status.textContent = res.ok ? 'Saved and synced.' : WHY[res.why] || 'Saved on this device.';
+      saveBtn.disabled = false;
+    });
+    var tokenInput = document.getElementById('ghtoken');
+    document.getElementById('tokensave').addEventListener('click', async function () {
+      var value = tokenInput.value.trim();
+      store.token(value);
+      notesSha = null;
+      var out = document.getElementById('tokenstatus');
+      if (!value) { out.textContent = 'Token removed from this device.'; return; }
+      out.textContent = 'Checking…';
+      var res = await pushNotes();
+      out.textContent = res.ok ? 'Token works - your notes now sync.' : WHY[res.why] || 'That did not work.';
+      tokenInput.value = '';
+    });
+  }
+  // ---------- the run page ----------
   function statGrid(run) {
     var cells = [
       [(run.m / 1000).toFixed(2), 'km'],
@@ -1082,61 +1652,16 @@ RUN_VIEW = """
       return '<section class="card"><h2>Heart rate</h2><p class="sub">No heart-rate detail stored for this ' +
         'run yet. The hourly update fetches a few runs at a time.</p></section>';
     }
-    var bands = conf.zones.map(function (z) {
-      return { lo: conf.maxhr * z[2] / 100, hi: conf.maxhr * z[3] / 100, cls: 'z' + z[0] };
-    });
-    var hr = run.hs;
-    var pc = (run.sp || []).map(function (v) { return v && v > 40 ? 100000 / v : null; });
-    var html = '<section class="card"><h2>During the run</h2>' +
-      '<p class="readout" id="readout">Move across the chart to read any point.</p>' +
-      '<div class="charts" id="charts">' +
-      chart(hr, { height: 150, label: 'Heart rate (bpm)', cls: 'hr', bands: bands, fmt: function (v) { return Math.round(v); } });
-    if (pc.filter(function (v) { return v; }).length > 5) {
-      var sm = smooth(pc);
-      html += chart(sm, { height: 120, label: 'Pace (min/km)', cls: 'pace', fmt: pace,
-        lo: percentile(sm, 0.02), hi: percentile(sm, 0.96) });
-    }
-    if (run.al && run.al.length) {
-      html += chart(run.al, { height: 90, label: 'Elevation (m)', cls: 'elev', area: true, fmt: function (v) { return Math.round(v) + ' m'; } });
-    }
-    return html + '</div><p class="hint">The coloured bands are your zones: blue easy, orange grey-zone, ' +
-      'green threshold, yellow hard.</p></section>';
+    return '<section class="card"><h2>During the run' +
+      '<button type="button" class="more" id="chartbig">Bigger ⤢</button></h2>' +
+      '<p class="readout" id="readout"></p>' +
+      '<div class="charts" id="charts" data-count="' + run.hs.length + '">' +
+      chartsHTML(run, 0, run.hs.length, false) + '</div>' +
+      '<p class="hint">Tap the charts to open them bigger, where you can zoom into a single interval.</p></section>';
   }
 
-  function attachProbe(run) {
-    var box = document.getElementById('charts'), out = document.getElementById('readout');
-    if (!box || !run.hs) return;
-    var charts = box.querySelectorAll('.cchart');
-    var n = run.hs.length;
-    function move(clientX) {
-      var first = charts[0], rect = first.getBoundingClientRect();
-      var left = +first.dataset.left, right = +first.dataset.right;
-      var frac = (clientX - rect.left) / rect.width * W;
-      frac = (frac - left) / (right - left);
-      var i = Math.max(0, Math.min(n - 1, Math.round(frac * (n - 1))));
-      for (var c = 0; c < charts.length; c++) {
-        var cur = charts[c].querySelector('.cursor');
-        var px = left + (right - left) * i / (n - 1);
-        cur.setAttribute('x1', px); cur.setAttribute('x2', px);
-        cur.style.opacity = 1;
-      }
-      var km = run.d && run.d[i] != null ? (run.d[i] / 1000).toFixed(2) + ' km' : '';
-      var bits = [km, run.hs[i] ? run.hs[i] + ' bpm' : null,
-        run.sp && run.sp[i] > 40 ? pace(100000 / run.sp[i]) + ' /km' : null,
-        run.t && run.t[i] != null ? hms(run.t[i]) : null,
-        run.al && run.al[i] != null ? Math.round(run.al[i]) + ' m' : null];
-      out.textContent = bits.filter(Boolean).join('  ·  ');
-    }
-    box.addEventListener('mousemove', function (e) { move(e.clientX); });
-    box.addEventListener('touchstart', function (e) { move(e.touches[0].clientX); }, { passive: true });
-    box.addEventListener('touchmove', function (e) { move(e.touches[0].clientX); }, { passive: true });
-    box.addEventListener('mouseleave', function () {
-      out.textContent = 'Move across the chart to read any point.';
-      for (var c = 0; c < charts.length; c++) charts[c].querySelector('.cursor').style.opacity = 0;
-    });
-  }
+  var current = null, currentMap = null;
 
-  var current = null;
   window.showRun = function (id) {
     var run = byId[id];
     current = run || null;
@@ -1148,21 +1673,67 @@ RUN_VIEW = """
     host.innerHTML =
       '<h1 class="runtitle">' + esc(run.n) + '</h1>' +
       '<p class="sub">' + dateText(run.dt) + '</p>' +
-      '<section class="card nopad">' + mapBox(run) + statGrid(run) + '</section>' +
-      chartsBlock(run) + lapsBlock(run) + splitsBlock(run) + zoneBlock(run) +
-      '<section class="card"><h2>Your notes</h2><p class="sub" style="margin:0">Writing notes on a run - and ' +
-      'having them show up on both your phone and your PC - is the next thing to build. It needs a one-time ' +
-      'setup step from you, so we will do it together.</p></section>' +
+      '<section class="card nopad"><div class="mapwrap"></div>' + statGrid(run) + '</section>' +
+      chartsBlock(run) + lapsBlock(run) + splitsBlock(run) + zoneBlock(run) + notesBlock(run) +
       '<p class="hint"><a href="https://www.strava.com/activities/' + run.id +
       '" target="_blank" rel="noopener">Open this run on Strava ↗</a></p>';
-    attachProbe(run);
+
+    var wrap = host.querySelector('.mapwrap');
+    var pts = run.poly ? decodePoly(run.poly) : [];
+    if (pts.length > 1) {
+      currentMap = new SlippyMap(wrap, pts, { expand: function () { openBigMap(run, pts); } });
+    } else {
+      wrap.remove();
+    }
+
+    var box = document.getElementById('charts');
+    if (box) {
+      var out = document.getElementById('readout');
+      out.dataset.idle = 'Move across the chart to read any point.';
+      out.textContent = out.dataset.idle;
+      attachProbe(box, out, run, 0);
+      var slid = 0, startX = 0;
+      box.addEventListener('touchstart', function (e) {
+        slid = 0; startX = e.touches[0].clientX;
+      }, { passive: true });
+      box.addEventListener('touchmove', function (e) {
+        slid = Math.max(slid, Math.abs(e.touches[0].clientX - startX));
+      }, { passive: true });
+      box.addEventListener('click', function () {
+        if (slid > 10) { slid = 0; return; }     // that was a scrub, not a tap
+        openCharts(run);
+      });
+      document.getElementById('chartbig').addEventListener('click', function (e) {
+        e.stopPropagation();
+        openCharts(run);
+      });
+    }
+    wireNotes(run);
+    pullNotes().then(function () {
+      var note = NOTES[run.id];
+      var field = document.getElementById('notetext');
+      if (field && note && !field.value && document.getElementById('run').classList.contains('on')) {
+        field.value = note.text || '';
+      }
+    });
   };
+
+  function openBigMap(run, pts) {
+    openSheet(esc(run.n), '<div class="bigmap"></div>' +
+      '<p class="hint">Drag to move, pinch or scroll to zoom, and switch between map, terrain and satellite.</p>',
+    function (body) {
+      var el = body.querySelector('.bigmap');
+      setTimeout(function () { new SlippyMap(el, pts, {}); }, 0);
+    });
+  }
 
   var resizeTimer = null;                      // the map is pixel-based, so redraw it on resize
   window.addEventListener('resize', function () {
     if (!current || !document.getElementById('run').classList.contains('on')) return;
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(function () { window.showRun(current.id); }, 250);
+    resizeTimer = setTimeout(function () {
+      if (currentMap) { currentMap.fit(); }
+    }, 250);
   });
 })();
 
@@ -1309,7 +1880,7 @@ def prepare(activities, config, details=None):
     }
 
 
-def render(activities, config, details=None):
+def render(activities, config, details=None, notes=None):
     d = prepare(activities, config, details)
     heads = {
         "home": ("Training", f'{d["week_label"]} · updated {d["updated"]}'),
@@ -1326,10 +1897,12 @@ def render(activities, config, details=None):
         + bodies[key] + '</section>'
         for key, label in SECTIONS)
     conf = {"maxhr": d["max_hr"], "zones": [[k, label, lo, hi] for k, label, lo, hi, _ in ZONES],
-            "names": NAMES, "colors": COLORS, "order": ORDER, "days": WEEKDAYS}
+            "names": NAMES, "colors": COLORS, "order": ORDER, "days": WEEKDAYS,
+            "repo": config.get("repo", "")}
     # "</" is escaped so a run named "</script>" cannot break out of the tag
     blob = lambda obj: json.dumps(obj, separators=(",", ":")).replace("</", "<\\/")
-    data = (f'<script>window.CONF={blob(conf)};window.RUNS={blob(runs_payload(d))};</script>')
+    data = (f'<script>window.CONF={blob(conf)};window.RUNS={blob(runs_payload(d))};'
+            f'window.NOTES={blob(notes or {})};</script>')
     nav = "".join(f'<a href="#/{key}">{icon(key)}<span>{label}</span></a>' for key, label in PAGES)
 
     return f"""<!doctype html>
