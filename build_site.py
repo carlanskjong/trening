@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 import report
+import strava_cache
 
 ROOT = Path(__file__).resolve().parent
 SITE = ROOT / "site"
@@ -190,16 +191,22 @@ def main():
     mock = os.environ.get("MOCK_ACTIVITIES")
     if mock:
         activities = json.loads(Path(mock).read_text())
+        detail_file = Path(os.environ.get("MOCK_DETAIL", "sample_detail.json"))
+        details = {int(k): v for k, v in json.loads(detail_file.read_text()).items()} \
+            if detail_file.exists() else {}
     else:
         secret = os.environ.get("STRAVA_CLIENT_SECRET", "").strip()
         if not secret:
             fail("STRAVA_CLIENT_SECRET secret is missing.")
-        activities = fetch_activities(get_access_token(str(config["client_id"]), secret))
+        access_token = get_access_token(str(config["client_id"]), secret)
+        activities = fetch_activities(access_token)
+        runs = [a for a in activities if a.get("sport_type", a.get("type")) in report.RUN_TYPES]
+        details = strava_cache.collect(runs, access_token, secret)
 
     tz = ZoneInfo(config.get("timezone", "Europe/Oslo"))
     now = datetime.now(tz)
     config["updated"], config["today"] = now.strftime("%d.%m.%Y %H:%M"), now.date().isoformat()
-    write_site(report.render(activities, config), password)
+    write_site(report.render(activities, config, details), password)
     runs = sum(1 for a in activities if a.get("sport_type", a.get("type")) in report.RUN_TYPES)
     print(f"Built dashboard: {len(activities)} activities, {runs} runs in the last {DAYS_BACK} days.")
 

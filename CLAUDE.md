@@ -16,13 +16,25 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
 
 ## How the app works today
 - `build_site.py` – run by GitHub Actions. Refreshes the Strava token, fetches the last 140 days of activities,
-  renders HTML via `report.py`, **encrypts it with AES-GCM (PBKDF2-SHA256, 250k rounds)** using `DASHBOARD_PASSWORD`,
+  collects per-run detail via `strava_cache.py`, renders HTML via `report.py`,
+  **encrypts it with AES-GCM (PBKDF2-SHA256, 250k rounds)** using `DASHBOARD_PASSWORD`,
   and writes `site/` (index.html login shell + manifest + icon). The browser decrypts with WebCrypto.
+- `strava_cache.py` – heart-rate/pace streams and laps for one run, trimmed to ~160 samples plus a bpm
+  histogram, kilometre splits and laps. Cached in **`cache/<activity id>.enc`**, AES-encrypted with a key
+  derived from `STRAVA_CLIENT_SECRET` (the repo is public), and committed by the workflow, so each run costs
+  two API calls once and nothing afterwards. At most 40 new runs per build, and it stops early if Strava's
+  rate-limit headers say the window is nearly used up - the rest arrive on the next hourly build.
 - `report.py` – all dashboard HTML/CSS/SVG. It renders **one file containing four pages** – Home, Plan, Runs,
   Progress – plus the menu (bottom tab bar on a phone, sidebar from 860px up). A tiny hash router (`#/home`,
   `#/plan`, …) shows one `<section class="page">` at a time, so switching pages needs no network. The file is in
-  five marked parts: settings/helpers, the plan logic, charts (hand-built inline SVG), the four pages, and the
-  shell (CSS + router). Public API used by `build_site.py`: `render(activities, config)` and `RUN_TYPES`.
+  five marked parts: settings/helpers, the plan logic, charts (hand-built inline SVG), the pages, and the
+  shell (CSS + router). Public API used by `build_site.py`: `render(activities, config, details)` and `RUN_TYPES`.
+  The **run page (`#/run/<id>`)** is the one part drawn in the browser instead of in Python: the runs are
+  embedded once as JSON (`window.RUNS`) and `RUN_VIEW` renders map, charts, laps and splits from it - far
+  smaller than shipping 50 pre-rendered run pages. The map is drawn from `summary_polyline` onto
+  OpenStreetMap tiles by hand (web-mercator maths in `RUN_VIEW`); there is **no Leaflet and no third-party
+  JavaScript**, and with no network the route still draws on a blank background.
+  Time in zones comes from the cached bpm histogram (real seconds per zone), not from a run's average.
 - `config.json` – client_id (281348), max_hr, plan_start, timezone, plan_days
   (which weekday each session lands on: Monday = 0, default threshold Tue, easy Thu, long run Sun).
 - `.github/workflows/update.yml` – runs hourly (cron `17 * * * *`), on manual dispatch, and on push to main.
@@ -35,11 +47,15 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
 ## Testing without Strava access
 You don't have the secrets. Test with sample data:
 ```
-python make_sample.py                       # writes sample_activities.json (fake runs, ~20 weeks)
+python make_sample.py                       # sample_activities.json + sample_detail.json (~20 weeks)
 MOCK_ACTIVITIES=sample_activities.json DASHBOARD_PASSWORD=test1234 python build_site.py
 ```
-`make_sample.py` generates the `/athlete/activities` format. To check a different week state, call
-`report.render(activities, config)` directly with `config["today"]` set to another date. Open `site/index.html`
+`make_sample.py` simulates each run second by second (speed, HR, altitude, route) and runs it through
+`strava_cache._shape`, so the sample detail has exactly the shape the cache stores. `build_site.py` picks up
+`sample_detail.json` automatically in mock mode (override with `MOCK_DETAIL`). To check a different week
+state, call `report.render(activities, config, details)` directly with `config["today"]` set to another date.
+Map tiles cannot be reached from a test sandbox - stub `**tile.openstreetmap.org/**` in Playwright to check
+map layout, and render with `details={}` to check how a run looks before its detail is cached. Open `site/index.html`
 through a local HTTP server (WebCrypto needs a secure context: localhost is fine) and check **phone width (390px) and desktop**.
 Never commit `site/`, sample data with real personal data, or any secret. Add a `.gitignore` for `site/` and `__pycache__/`.
 
@@ -56,9 +72,10 @@ What each page holds now, and what is still missing:
    latest run with a coach comment.
 2. **Plan** – shows this week's three sessions (ticked when done), the threshold progression with "you are here",
    the next five weeks and the HR zones. **Still to do: editing the plan, and a month calendar view.**
-3. **Runs** – list of past runs grouped by month. **Still to do: a per-run page** with map (Leaflet +
-   OpenStreetMap tiles, from `summary_polyline`), HR/pace charts and laps (Strava streams + laps API, cached),
-   zone breakdown, and **personal notes he can write and save**.
+3. **Runs** – list of past runs grouped by month, each opening a **run page** (`#/run/<id>`) with the route on
+   an OpenStreetMap background, stats, heart-rate/pace/elevation charts with a scrubber, laps (threshold reps
+   highlighted), kilometre splits and a true time-in-zones breakdown. **Still to do: personal notes he can
+   write and save** (see the open design question below).
 4. **Progress** – weekly volume, time in zones, easy pace at easy HR, threshold-session pace over time.
    **Still to do: best efforts (1k/5k/10k) and run-vs-run comparison.**
 Suggested extras: Settings (max HR, zones, plan start), shoe mileage, race goal + predicted time.

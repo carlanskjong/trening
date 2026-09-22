@@ -38,13 +38,15 @@ jobs:
           DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
         run: python build_site.py
 
-      - name: Save new Strava login and keep the schedule alive
+      - name: Save the Strava login and the cached run detail, keep the schedule alive
         run: |
           git config user.name "dashboard-bot"
           git config user.email "dashboard-bot@users.noreply.github.com"
-          git add token.enc 2>/dev/null || true
+          # token.enc = the refreshed Strava login, cache/ = per-run heart-rate detail.
+          # Both are encrypted; without them every build would re-fetch everything.
+          git add token.enc cache 2>/dev/null || true
           if ! git diff --cached --quiet; then
-            git commit -m "Update Strava login [skip ci]"
+            git commit -m "Update Strava login and run cache [skip ci]"
           elif [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt 3456000 ]; then
             git commit --allow-empty -m "Keep hourly schedule active [skip ci]"
           fi

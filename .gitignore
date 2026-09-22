@@ -2,3 +2,4 @@ site/
 __pycache__/
 *.pyc
 sample_activities.json
+sample_detail.json
