@@ -35,6 +35,14 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   OpenStreetMap tiles by hand (web-mercator maths in `RUN_VIEW`); there is **no Leaflet and no third-party
   JavaScript**, and with no network the route still draws on a blank background.
   Time in zones comes from the cached bpm histogram (real seconds per zone), not from a run's average.
+- **App behaviour (PWA).** `site/sw.js` is written by every build with a fresh `VERSION` stamp
+  (the build time). It precaches the shell and serves same-origin requests network-first, so the app opens
+  instantly, **works with no signal**, and still shows the newest page when online. The login shell registers
+  it; the dashboard watches for a new worker and shows an **"Update ready · Reload"** bar, so a push to main
+  reaches his phone within minutes with no app store and no reinstalling. `make_icon.py` draws
+  `icon.png` / `icon-192.png` / `icon-180.png` / `icon-maskable.png` (needs Pillow; the site build does not).
+  Verify changes here by serving `site/` over localhost, then testing offline with Playwright's
+  `context.set_offline(True)` and the update flow by rebuilding and calling `registration.update()`.
 - `config.json` – client_id (281348), max_hr, plan_start, timezone, plan_days
   (which weekday each session lands on: Monday = 0, default threshold Tue, easy Thu, long run Sun).
 - `.github/workflows/update.yml` – runs hourly (cron `17 * * * *`), on manual dispatch, and on push to main.
@@ -94,9 +102,11 @@ What each page holds now, and what is still missing:
 6. **Settings page** – so far one setting: light / dark / **follow system** (system is the default today, via
    `prefers-color-scheme`). A theme choice needs a `data-theme` attribute on `<html>` and CSS that honours it.
    When it exists, move the GitHub token field there from the notes card. Later: max HR, zones, plan start.
-7. **A real installable app** – he is toying with making this an actual app rather than a home-screen web page.
-   Worth checking what stays free: a proper PWA (installable, offline, free) or an Android build via
-   TWA/Bubblewrap is free; the Apple developer programme is not, so iOS is out under the no-paid-services rule.
+7. **A real installable app** – **checked 23.09.2026: TestFlight needs the Apple Developer Program at
+   $99/year**, plus a Mac to build on, so it breaks the no-paid-services rule. The free route was built
+   instead: the PWA above (installable, offline, instant updates). Remaining free options if he wants more:
+   an Android APK via Bubblewrap/TWA that he sideloads (free; the Play Store costs $25 once). A real iOS
+   build has no free path. Do not spend effort on iOS unless he decides to pay.
 
 Other ideas not yet asked for: shoe mileage, race goal + predicted time, best efforts, run-vs-run comparison.
 

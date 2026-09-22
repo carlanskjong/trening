@@ -861,6 +861,14 @@ rect.s4,i.s4,.bar-seg.s4 { fill:var(--s4); background:var(--s4); }
 .zrow { display:flex; justify-content:space-between; gap:12px; font-size:14px; color:var(--ink2);
   padding:5px 0; border-bottom:1px solid var(--grid); }
 .zrow:last-child { border-bottom:0; }
+#update { position:fixed; z-index:40; left:50%; transform:translateX(-50%);
+  bottom:calc(74px + env(safe-area-inset-bottom)); display:flex; align-items:center; gap:10px;
+  background:var(--ink); color:var(--page); font-size:14px; white-space:nowrap;
+  padding:8px 8px 8px 16px; border-radius:99px; box-shadow:0 6px 20px rgba(0,0,0,.28); }
+#update[hidden] { display:none; }
+#updatego { font:inherit; font-weight:600; font-size:13px; padding:6px 13px; border:0;
+  border-radius:99px; background:var(--accent); color:#fff; cursor:pointer; }
+@media (min-width:860px) { #update { bottom:24px; left:calc(50% + 108px); } }
 #tip { position:fixed; pointer-events:none; background:var(--surface); color:var(--ink);
   border:1px solid var(--ring); border-radius:8px; padding:8px 10px; font-size:13px;
   box-shadow:0 4px 16px rgba(0,0,0,.12); display:none; white-space:nowrap; z-index:20; }
@@ -1767,6 +1775,31 @@ ROUTER = r"""
     if (scroll) window.scrollTo(0, 0);
   }
   function fromHash() { return (location.hash || '').replace(/^#\/?/, '').split('/'); }
+  // A new build deploys straight to the phone - no app store, no reinstalling.
+  // When the service worker has fetched one, offer a reload.
+  if ('serviceWorker' in navigator) {
+    var bar = document.getElementById('update');
+    var announce = function () {
+      bar.hidden = false;
+      document.getElementById('updatego').onclick = function () { location.reload(); };
+    };
+    navigator.serviceWorker.getRegistration().then(function (reg) {
+      if (!reg) return;
+      if (reg.waiting && navigator.serviceWorker.controller) announce();
+      reg.addEventListener('updatefound', function () {
+        var fresh = reg.installing;
+        if (!fresh) return;
+        fresh.addEventListener('statechange', function () {
+          if (fresh.state === 'installed' && navigator.serviceWorker.controller) announce();
+        });
+      });
+      var check = function () { reg.update().catch(function () {}); };
+      setInterval(check, 15 * 60 * 1000);
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) check();
+      });
+    }).catch(function () {});
+  }
   window.addEventListener('hashchange', function () { var h = fromHash(); show(h[0], h[1], true); });
   var start = fromHash();
   show(start[0] || store.get() || names[0], start[1], false);
@@ -1918,6 +1951,7 @@ def render(activities, config, details=None, notes=None):
 <style>{CSS}</style></head>
 <body>
 <nav class="tabs" aria-label="Sections"><span class="brand">Trening</span>{nav}</nav>
+<div id="update" hidden><span>Update ready</span><button type="button" id="updatego">Reload</button></div>
 <main>{sections}</main>
 <div id="tip"></div>
 {data}

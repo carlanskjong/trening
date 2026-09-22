@@ -138,12 +138,14 @@ SHELL = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<meta name="theme-color" content="#2a78d6">
+<meta name="theme-color" content="#0e2038">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Trening">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.png">
-<link rel="apple-touch-icon" href="icon.png">
+<link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
 <title>Training Dashboard</title>
 <style>
 :root { color-scheme: light; --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --muted:#6b6a66; --ring:rgba(11,11,11,.14); --accent:#2a78d6; --bad:#d03b3b; }
@@ -187,6 +189,9 @@ const store = { get(){ try { return localStorage.getItem('dash-pw'); } catch(e) 
   set(v){ try { localStorage.setItem('dash-pw', v); } catch(e) {} }, clear(){ try { localStorage.removeItem('dash-pw'); } catch(e) {} } };
 (async () => { const saved = store.get();
   if (saved) { try { const html = await unlock(saved); pwUsed = saved; show(html); } catch(e) { store.clear(); } } })();
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
 document.getElementById('f').addEventListener('submit', async e => {
   e.preventDefault();
   const pw = document.getElementById('pw').value, btn = document.getElementById('go');
@@ -198,18 +203,69 @@ document.getElementById('f').addEventListener('submit', async e => {
 </body></html>"""
 
 
-def write_site(page_html, password):
+SERVICE_WORKER = """/*
+ * Makes the dashboard behave like an app: it opens instantly, works with no
+ * signal, and picks up a new build as soon as one is deployed.
+ *
+ * Every build writes a new VERSION here, which is what tells the browser the
+ * app has changed. Same-origin requests go to the network first (so you always
+ * get the newest page when you have signal) and fall back to the cache.
+ */
+const VERSION = '__VERSION__';
+const CACHE = 'trening-' + VERSION;
+const SHELL = ['./', './index.html', './manifest.webmanifest',
+               './icon.png', './icon-192.png', './icon-180.png', './icon-maskable.png'];
+
+self.addEventListener('install', e => {
+  e.waitUntil(caches.open(CACHE)
+    .then(c => Promise.allSettled(SHELL.map(u => c.add(u))))
+    .then(() => self.skipWaiting()));
+});
+
+self.addEventListener('activate', e => {
+  e.waitUntil(caches.keys()
+    .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    .then(() => self.clients.claim()));
+});
+
+self.addEventListener('fetch', e => {
+  const req = e.request;
+  if (req.method !== 'GET') return;
+  if (new URL(req.url).origin !== location.origin) return;   // map tiles, GitHub: leave alone
+  e.respondWith(
+    fetch(req).then(res => {
+      if (res && res.ok) {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
+      }
+      return res;
+    }).catch(() => caches.match(req).then(hit => hit || caches.match('./index.html')))
+  );
+});
+"""
+
+
+def write_site(page_html, password, version):
     if SITE.exists():
         shutil.rmtree(SITE)
     SITE.mkdir()
     payload = json.dumps(encrypt_page(page_html, password))
+    SITE.mkdir(exist_ok=True)
     (SITE / "index.html").write_text(SHELL.replace("__PAYLOAD__", payload), encoding="utf-8")
     (SITE / "manifest.webmanifest").write_text(json.dumps({
-        "name": "Training Dashboard", "short_name": "Trening", "start_url": ".", "display": "standalone",
-        "background_color": "#f9f9f7", "theme_color": "#2a78d6",
-        "icons": [{"src": "icon.png", "sizes": "512x512", "type": "image/png"}]}), encoding="utf-8")
-    if (ROOT / "icon.png").exists():
-        shutil.copy(ROOT / "icon.png", SITE / "icon.png")
+        "name": "Trening – Training Dashboard", "short_name": "Trening",
+        "description": "Your runs, your plan and your progress.",
+        "start_url": ".", "scope": ".", "display": "standalone", "orientation": "portrait",
+        "background_color": "#0e2038", "theme_color": "#0e2038",
+        "icons": [
+            {"src": "icon-192.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "icon.png", "sizes": "512x512", "type": "image/png"},
+            {"src": "icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        ]}), encoding="utf-8")
+    for name in ("icon.png", "icon-192.png", "icon-180.png", "icon-maskable.png"):
+        if (ROOT / name).exists():
+            shutil.copy(ROOT / name, SITE / name)
+    (SITE / "sw.js").write_text(SERVICE_WORKER.replace("__VERSION__", version), encoding="utf-8")
 
 
 def main():
@@ -237,7 +293,9 @@ def main():
     now = datetime.now(tz)
     config["updated"], config["today"] = now.strftime("%d.%m.%Y %H:%M"), now.date().isoformat()
     config["repo"] = os.environ.get("GITHUB_REPOSITORY") or config.get("repo", "")
-    write_site(report.render(activities, config, details, load_notes(password)), password)
+    version = now.strftime("%Y%m%d-%H%M%S")
+    config["version"] = version
+    write_site(report.render(activities, config, details, load_notes(password)), password, version)
     runs = sum(1 for a in activities if a.get("sport_type", a.get("type")) in report.RUN_TYPES)
     print(f"Built dashboard: {len(activities)} activities, {runs} runs in the last {DAYS_BACK} days.")
 
