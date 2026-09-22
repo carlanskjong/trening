@@ -1168,7 +1168,7 @@ RUN_VIEW = """
 
 """
 
-ROUTER = """
+ROUTER = r"""
 (function () {
   var pages = Array.prototype.slice.call(document.querySelectorAll('.page'));
   var links = Array.prototype.slice.call(document.querySelectorAll('.tabs a'));
