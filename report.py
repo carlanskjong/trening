@@ -593,7 +593,7 @@ def runs_payload(d):
         if det:
             item |= {"t": det.get("t") or [], "d": det.get("d") or [],
                      "hs": det.get("hr") or [], "sp": det.get("sp") or [],
-                     "al": det.get("alt") or [],
+                     "al": det.get("alt") or [], "cd": det.get("cad") or [],
                      "laps": det.get("laps") or [], "sl": det.get("splits") or []}
         out.append(item)
     return out
