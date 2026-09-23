@@ -32,9 +32,12 @@
     var n = daysBetween(TODAY, s);
     return n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : n === -1 ? 'Yesterday' : dayName(s);
   }
-  function planWeek(monday) {
-    var start = mondayOf(conf.planStart || TODAY);
-    return monday < start ? 0 : Math.floor(daysBetween(start, monday) / 7) + 1;
+  // Calendar (ISO) week number - the plan is written week by week that way.
+  function isoWeek(s) {
+    var d = parseYmd(s);
+    d.setDate(d.getDate() + 3 - (d.getDay() + 6) % 7);          // the Thursday decides the year
+    var jan4 = new Date(d.getFullYear(), 0, 4);
+    return 1 + Math.round(((d - jan4) / 864e5 - 3 + (jan4.getDay() + 6) % 7) / 7);
   }
 
   /* ---------------- your version of the plan ---------------- */
@@ -47,7 +50,10 @@
     if (!b) return a;
     return (b.updated || '') > (a.updated || '') ? b : a;
   }
-  var mine = newest(PLAN.saved, planStore.get());
+  // Edits belong to the version of the plan they were made on; a new plan
+  // (a new block) replaces them rather than hiding under them.
+  function sameVersion(p) { return p && (p.reset || p.version === PLAN.standard.version) ? p : null; }
+  var mine = sameVersion(newest(PLAN.saved, planStore.get()));
 
   function sessions() {
     if (!mine || mine.reset) return PLAN.standard.sessions;
@@ -63,7 +69,7 @@
   function makeMine() {
     if (!mine || mine.reset) {
       mine = { sessions: PLAN.standard.sessions.map(function (s) { return Object.assign({}, s); }),
-               until: PLAN.standard.until, updated: '' };
+               until: PLAN.standard.until, updated: '', version: PLAN.standard.version };
     }
   }
   // Keep the standard weeks up to `date` too, before placing something after the end.
@@ -102,7 +108,7 @@
     change(function () { mine.sessions = mine.sessions.filter(function (s) { return s.id !== id; }); });
   }
   function resetPlan() {
-    mine = { reset: true, sessions: [], until: '', updated: new Date().toISOString() };
+    mine = { reset: true, sessions: [], until: '', updated: new Date().toISOString(), version: PLAN.standard.version };
     planStore.set(mine);
     queueSync();
     drawAll();
@@ -116,7 +122,7 @@
     syncTimer = setTimeout(sync, 1500);                // one save for a burst of moves
   }
   async function sync() {
-    var body = mine && mine.reset ? { sessions: [], until: '', updated: mine.updated } : mine;
+    var body = mine && mine.reset ? { sessions: [], until: '', updated: mine.updated, version: mine.version } : mine;
     var res = await putEncrypted('plan.enc', body, 'Save training plan');
     if (!res.ok && res.why === 'conflict') res = await putEncrypted('plan.enc', body, 'Save training plan');
     status(res.ok ? 'Saved and synced.' : WHY[res.why] || 'Saved on this device.');
@@ -125,6 +131,7 @@
   pullEncrypted('plan.enc').then(function (remote) {
     if (!remote || !remote.updated) return;
     if (!remote.sessions || !remote.sessions.length) remote.reset = true;
+    if (!sameVersion(remote)) return;
     var pick = newest(mine, remote);
     if (pick === remote && (!mine || remote.updated !== mine.updated)) {
       mine = remote; planStore.set(mine); drawAll();
@@ -148,7 +155,8 @@
     return sessions().filter(function (s) { return s.date >= monday && s.date <= end; });
   }
   function matchWeek(monday) {
-    var sess = weekSessions(monday), left = weekRuns(monday).slice(), done = {};
+    var all = weekSessions(monday), left = weekRuns(monday).slice(), done = {};
+    var sess = all.filter(function (s) { return !s.opt; }).concat(all.filter(function (s) { return s.opt; }));
     var take = function (r) { left = left.filter(function (x) { return x !== r; }); return r; };
     sess.forEach(function (s) {
       var same = left.filter(function (r) { return r.dt.slice(0, 10) === s.date; });
@@ -164,7 +172,9 @@
       else if (s.type === 'easy') pick = left.filter(function (r) { return r.k !== 'threshold'; })[0];
       if (pick) done[s.id] = take(pick);
     });
-    return { sessions: sess, done: done, extra: left };
+    var required = all.filter(function (s) { return !s.opt; });
+    return { sessions: all, required: required, done: done, extra: left,
+             doneCount: required.filter(function (s) { return done[s.id]; }).length };
   }
 
   /* ---------------- drawing ---------------- */
@@ -172,14 +182,15 @@
 
   function sessionChip(s, m, compact) {
     var t = TYPES[s.type] || TYPES.other, run = m.done[s.id];
-    var state = run ? 'done' : s.date < TODAY ? 'missed' : '';
+    var state = run ? 'done' : s.date < TODAY && !s.opt ? 'missed' : '';
     var mark = run ? '✓' : state === 'missed' ? '–' : '';
+    if (s.opt) state += ' opt';
     if (compact) {
       return '<button type="button" class="sess mini ' + state + '" data-id="' + esc(s.id) + '" style="--zc:var(--z-' + t.zone + ')"' +
         ' title="' + esc(s.title) + '">' + (run ? '✓ ' : '') + t.short + '</button>';
     }
     var sub = run ? 'Done · ' + (run.m / 1000).toFixed(1) + ' km · ' + pace(run.s / (run.m / 1000)) + ' /km'
-      : state === 'missed' ? 'Not done' : targetFor(s.type);
+      : state === 'missed' ? 'Not done' : (s.opt ? 'Optional · ' : '') + targetFor(s.type);
     return '<button type="button" class="sess ' + state + '" data-id="' + esc(s.id) + '" style="--zc:var(--z-' + t.zone + ')">' +
       '<span class="s-mark">' + mark + '</span><span class="s-main"><b>' + esc(s.title || t.name) + '</b>' +
       (sub ? '<small>' + esc(sub) + '</small>' : '') + '</span></button>';
@@ -203,10 +214,9 @@
         '<button type="button" class="addbtn" data-add="' + day + '" aria-label="Add a session on ' + dayName(day) + '">+</button></div>';
     }
     body.innerHTML = '<div class="wkdays">' + html + '</div>';
-    var wk = planWeek(monday), done = m.sessions.filter(function (s) { return m.done[s.id]; }).length;
-    document.getElementById('caltitle').textContent = wk ? 'Week ' + wk : 'Before the plan';
-    document.getElementById('calsub').textContent = dm(monday) + '–' + dm(addDays(monday, 6)) + ' · ' +
-      done + ' of ' + m.sessions.length + ' done';
+    document.getElementById('caltitle').textContent = 'Week ' + isoWeek(monday);
+    document.getElementById('calsub').textContent = dm(monday) + '–' + dm(addDays(monday, 6)) +
+      (m.required.length ? ' · ' + m.doneCount + ' of ' + m.required.length + ' done' : ' · nothing planned');
   }
 
   function drawMonth(body) {
@@ -230,7 +240,7 @@
     }
     body.innerHTML = html + '</div>';
     document.getElementById('caltitle').textContent = MONTHS[d.getMonth()] + ' ' + d.getFullYear();
-    var planned = sessions().filter(function (s) { return s.date.slice(0, 7) === first.slice(0, 7); }).length;
+    var planned = sessions().filter(function (s) { return !s.opt && s.date.slice(0, 7) === first.slice(0, 7); }).length;
     document.getElementById('calsub').textContent = planned + ' sessions planned';
   }
 
@@ -252,11 +262,10 @@
     if (!host) return;
     var monday = mondayOf(TODAY), m = matchWeek(monday);
     var open = sessions().filter(function (s) {
-      if (s.date < monday) return false;
-      if (s.date <= addDays(monday, 6) && m.done[s.id]) return false;
-      return s.date >= TODAY;
+      if (s.opt || s.date < TODAY) return false;
+      return !(s.date <= addDays(monday, 6) && m.done[s.id]);
     });
-    var missed = m.sessions.filter(function (s) { return s.date < TODAY && !m.done[s.id]; });
+    var missed = m.required.filter(function (s) { return s.date < TODAY && !m.done[s.id]; });
     var next = open[0], html;
     if (next) {
       var t = TYPES[next.type] || TYPES.other, today = next.date === TODAY;
@@ -279,18 +288,13 @@
         '). Drag ' + (missed.length > 1 ? 'them' : 'it') + ' to a later day in the plan if you still want to fit ' +
         (missed.length > 1 ? 'them' : 'it') + ' in.</p>';
     }
-    if (conf.planStart && TODAY < conf.planStart) {
-      var n = daysBetween(TODAY, conf.planStart);
-      html += '<p class="hint">Week 1 of the plan starts ' + dayName(conf.planStart) + ' ' + dm(conf.planStart) +
-        ' (' + (n === 1 ? 'tomorrow' : 'in ' + n + ' days') + '). Until then it is a warm-up - same sessions, no pressure.</p>';
-    }
     html += '<div class="nx-foot"><a class="btn small ghost" href="#/plan">Open the plan</a></div>';
     host.innerHTML = html;
 
     var cells = '';
     for (var i = 0; i < 7; i++) {
       var day = addDays(monday, i);
-      var s = m.sessions.filter(function (x) { return x.date === day; })[0];
+      var s = m.sessions.filter(function (x) { return x.date === day && (!x.opt || m.done[x.id]); })[0];
       var ex = m.extra.filter(function (r) { return r.dt.slice(0, 10) === day; })[0];
       var cls = 'day' + (day === TODAY ? ' today' : ''), mark = '·', lab = 'Rest', wide = 'Rest', zc = '';
       if (s && m.done[s.id]) {
@@ -308,9 +312,8 @@
         '<span class="dlabel">' + lab + '</span><span class="dlabel wide">' + wide + '</span></a>';
     }
     strip.innerHTML = cells;
-    var wk = planWeek(monday), done = m.sessions.filter(function (x) { return m.done[x.id]; }).length;
-    document.getElementById('homeweeksub').textContent = (wk ? 'Week ' + wk : 'Warm-up week') + ' · ' +
-      done + ' of ' + m.sessions.length + ' sessions done' +
+    document.getElementById('homeweeksub').textContent = 'Week ' + isoWeek(monday) + ' · ' +
+      m.doneCount + ' of ' + m.required.length + ' sessions done' +
       (m.extra.length ? ' · ' + m.extra.length + ' extra run' + (m.extra.length > 1 ? 's' : '') : '');
   }
 
@@ -328,8 +331,9 @@
       '<p class="eyebrow">Kind</p>' + typeButtons(s.type) +
       '<label class="pfield"><span class="eyebrow">Title</span><input class="input" id="ptitle" maxlength="120" value="' + esc(s.title) + '"></label>' +
       '<label class="pfield"><span class="eyebrow">Day</span><input class="input" type="date" id="pdate" value="' + s.date + '"></label>' +
-      '<label class="pfield"><span class="eyebrow">What to do</span><textarea class="input" id="pdetail" rows="5" maxlength="2000">' +
+      '<label class="pfield"><span class="eyebrow">Notes</span><textarea class="input" id="pdetail" rows="5" maxlength="2000">' +
       esc(s.detail) + '</textarea></label>' +
+      '<label class="pcheck"><input type="checkbox" id="popt"' + (s.opt ? ' checked' : '') + '> Optional - fine to skip</label>' +
       '<div class="pbtns"><button type="submit" class="btn">Save</button>' +
       '<button type="button" class="btn ghost" data-close>Cancel</button></div></form>';
   }
@@ -346,9 +350,12 @@
     body.querySelector('#pform').addEventListener('submit', function (e) {
       e.preventDefault();
       var date = body.querySelector('#pdate').value || s.date;
-      saveSession({ id: s.id, type: type, date: date,
+      var obj = { id: s.id, type: type, date: date,
         title: body.querySelector('#ptitle').value.trim() || TYPES[type].name,
-        detail: body.querySelector('#pdetail').value.trim() });
+        detail: body.querySelector('#pdetail').value.trim() };
+      if (body.querySelector('#popt').checked) obj.opt = true;
+      else obj.opt = false;
+      saveSession(obj);
       close();
     });
     if (isNew) body.querySelector('#ptitle').select();
@@ -369,7 +376,8 @@
       '<div class="psess" style="--zc:var(--z-' + t.zone + ')">' +
       '<div class="nx-top"><span class="typechip"><i></i>' + t.name + '</span><span class="nx-when">' +
       dayName(s.date) + ' ' + dm(s.date) + '</span>' +
-      (run ? '<span class="pill ok-pill">Done ✓</span>' : s.date < TODAY ? '<span class="pill warn">Not done</span>' : '') + '</div>' +
+      (run ? '<span class="pill ok-pill">Done ✓</span>' : s.opt ? '<span class="pill">Optional</span>'
+        : s.date < TODAY ? '<span class="pill warn">Not done</span>' : '') + '</div>' +
       (target ? '<div class="nx-target"><span class="lab">Heart rate</span><span class="big">' + target + '</span></div>' : '') +
       (s.detail ? '<p class="nx-detail">' + esc(s.detail) + '</p>' : '') +
       (run ? '<a class="xrun big" href="#/run/' + run.id + '" style="--zc:var(--z-' + (run.z === 'nohr' ? 'nohr' : run.z) + ')"><i></i>' +

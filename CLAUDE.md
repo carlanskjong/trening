@@ -11,9 +11,17 @@
 Act as both **running coach** and **developer**. Coaching follows the **Norwegian method** and Marius Bakken's writing:
 mostly truly easy running + controlled (lactate-guided / sub-)threshold intervals, never all-out; avoid the "grey zone".
 - Max HR: **205** (stated by the athlete). Easy < 75% (under 154 bpm), Moderate 75–82%, Threshold 82–88% (168–179 bpm), Hard 88%+.
-- Runs **3 times per week**: 1 threshold session + 1 easy run + 1 long easy run.
-- Threshold progression every 2 weeks: 6×3 → 5×5 → 4×7 → 3×10 min (1–1½ min jog rest). Plan week 1 starts Mon 28.09.2026.
-- These values live in `config.json` / `report.py`. Keep coaching claims honest; no lactate meter, so HR is the proxy.
+- **His own plan (sent 23.09.2026, "Treningsplan Carl", from Bakken's book) is the standard plan**, in
+  `training_plan.py`: 3 sessions a week – usually **two threshold sessions + one long easy run**, plus an
+  optional easy jog (never counted as missed). Talk test: at threshold you can say about three words.
+  Weeks are **ISO week numbers of 2026** (his plan is written that way), weeks 15–42. The long run follows his
+  ladder 80, 75, 85, 90, 97, 105, 110, 120 min (week 39 says 75 in the week but 80 in the ladder – shown as
+  "75–80"). **Weeks 43–46 are Claude's suggestions** in the same style, marked as such – he can edit them.
+  **The repo is public**: personal items from his plan (illness, knee, military exercises, places, race names,
+  days off) were deliberately left out of `training_plan.py`; they belong in the app (encrypted).
+  When the plan is replaced by a new block, **bump `VERSION`** in `training_plan.py`, so edits he saved of the
+  old plan (which carry the version) stop hiding the new one.
+- These values live in `config.json` / `report.py` / `training_plan.py`. Keep coaching claims honest; no lactate meter, so HR is the proxy.
 
 ## How the app works today
 - `build_site.py` – run by GitHub Actions. Refreshes the Strava token, fetches the last 140 days of activities,
@@ -59,8 +67,9 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   along every route, intensity calibrated per zoom so one pass ≈ 13% of the scale and ~8 passes ≈ "often";
   fades into the paths from zoom 13. *Routes* = each run coloured by kind. Filters: period and kind. Tap a route
   for a card that opens the run.
-- **The plan is data** (`plan.js`). The build sends `PLAN.standard` (the threshold progression as a session
-  list, `standard_plan()`, ids like `2026-W40-threshold`, 4 weeks back to 16 weeks ahead) and `PLAN.saved`
+- **The plan is data** (`plan.js`). The build sends `PLAN.standard` (his plan from `training_plan.py` as a session
+  list, `standard_plan()`, ids like `2026-W40-2`, from 140 days back to the plan's last week; `split_title()`
+  moves the "10 min oppvarming + … + 5 min nedjogg" wrapper into the notes so a chip shows just the set) and `PLAN.saved`
   (from `plan.enc`, via `load_plan()`, which **validates every field**). The first edit copies the standard
   plan into his own; after that his version wins up to its `until` date and the standard plan fills in beyond.
   Week view (default) and month view; **hold a session and drag it to another day** (mouse: just drag; a quick
@@ -81,8 +90,8 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   shell, serves same-origin requests network-first, and keeps the vendored files in a separate
   `trening-vendor` cache (cache-first, survives new builds). The dashboard shows **"Update ready · Reload"**
   when a new worker arrives. `make_icon.py` draws the icons (needs Pillow; the site build does not).
-- `config.json` – client_id (281348), max_hr, plan_start, timezone, plan_days (default weekday per session,
-  used by the standard plan; moving sessions is done in the calendar now).
+- `config.json` – client_id (281348), max_hr, timezone. (plan_start/plan_days are gone: dates come from
+  `training_plan.py`, and moving sessions is done in the calendar.)
 - `.github/workflows/update.yaml` – hourly (cron `17 * * * *`), manual dispatch, and on push to main. Deploys to
   GitHub Pages (Source: GitHub Actions). Commits `token.enc` and `cache/`, plus a keep-alive commit if idle > 40 days.
 - `token.enc` – Strava refresh token, AES with a key from `STRAVA_CLIENT_SECRET`. Never commit it in plaintext.
@@ -132,18 +141,15 @@ Never commit `site/`, sample data, a real `plan.enc` made in a test, or any secr
 Built (as of 23.09.2026):
 1. **Home** – the next session from the (editable) plan with its HR target, this week's strip with ticks,
    three key numbers, the latest run with a coach comment.
-2. **Plan** – week/month calendar with drag-to-move, edit, add and remove, synced via `plan.enc`; threshold
-   progression with "you are here"; HR zones. **He said (23.09.2026) he will send his own current training
-   plan next – adapt the plan to it.** The likely shape: change `standard_plan()`/`week_sessions()` so the
-   standard plan *is* his plan. Before putting it in the public repo, check it holds nothing personal; if it
-   does, it can only live in `plan.enc`, which only the browser (knowing the password) can write.
+2. **Plan** – week/month calendar with drag-to-move, edit, add and remove, synced via `plan.enc`; his own
+   plan (see "Your role"); ISO week numbers; a "How this plan works" card with Bakken's key points; HR zones.
 3. **Runs** – list by month with a zone stripe; run page with map preview + 3D explorer, stats (incl. cadence
    and effort), HR / pace / cadence / elevation charts (pop-out, zoom, pinch), laps, splits, time in zones, notes.
 4. **Map** – heat map and routes of every run, filters, tap to open, 3D.
 5. **Progress** – effort this week vs usual range, easy share, metres per beat, cadence; weekly training load;
    speed vs heart rate; aerobic efficiency; time in zones; threshold rep pace; long-run decoupling; cadence;
    weekly distance.
-6. **Settings** – appearance, default basemap and route line, max HR and plan start, GitHub token, about/update.
+6. **Settings** – appearance, default basemap and route line, max HR, GitHub token, about/update.
 
 Maps history, so it is not re-litigated: the hand-drawn raster map was replaced by MapLibre on 23.09.2026.
 **CARTO basemaps need an API key** (watermark "API KEY REQUIRED" since ~Aug 2026; `roboes/strava-local-heatmap-tool`

@@ -52,8 +52,6 @@
       status.textContent = 'Saving…';
       var body = {
         max_hr: parseInt(document.getElementById('setmaxhr').value, 10) || conf.maxhr,
-        plan_start: document.getElementById('setstart').value || conf.planStart,
-        plan_days: conf.planDays,
         updated: new Date().toISOString()
       };
       var res = await putEncrypted('settings.enc', body, 'Save training settings');

@@ -132,24 +132,11 @@ def load_encrypted(path, password, what):
 
 
 def load_settings(password):
-    """His own training settings, saved from the Settings page, over config.json."""
+    """His own training settings (max heart rate), saved from the Settings page, over config.json."""
     saved = load_encrypted(SETTINGS_FILE, password, "his saved settings")
     keep = {}
     if isinstance(saved.get("max_hr"), int) and 120 <= saved["max_hr"] <= 230:
         keep["max_hr"] = saved["max_hr"]
-    start = saved.get("plan_start")
-    if isinstance(start, str) and len(start) == 10:
-        try:
-            datetime.strptime(start, "%Y-%m-%d")
-            keep["plan_start"] = start
-        except ValueError:
-            pass
-    days = saved.get("plan_days")
-    if isinstance(days, dict):
-        clean = {k: v for k, v in days.items()
-                 if k in ("threshold", "easy", "long") and isinstance(v, int) and 0 <= v <= 6}
-        if clean:
-            keep["plan_days"] = clean
     return keep
 
 
@@ -179,11 +166,15 @@ def load_plan(password):
         if not (isinstance(s, dict) and is_day(s.get("date")) and s.get("type") in PLAN_TYPES
                 and isinstance(s.get("id"), str) and len(s["id"]) <= 80):
             continue
-        sessions.append({"id": s["id"], "date": s["date"], "type": s["type"],
-                         "title": str(s.get("title") or "")[:120], "detail": str(s.get("detail") or "")[:2000]})
+        item = {"id": s["id"], "date": s["date"], "type": s["type"],
+                "title": str(s.get("title") or "")[:120], "detail": str(s.get("detail") or "")[:2000]}
+        if s.get("opt") is True:
+            item["opt"] = True
+        sessions.append(item)
     if not sessions or not is_day(saved.get("until")):
         return None
-    return {"sessions": sessions, "until": saved["until"], "updated": str(saved.get("updated") or "")[:40]}
+    return {"sessions": sessions, "until": saved["until"], "updated": str(saved.get("updated") or "")[:40],
+            "version": str(saved.get("version") or "")[:60]}
 
 
 SHELL = """<!doctype html>

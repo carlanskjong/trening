@@ -26,6 +26,7 @@ from html import escape
 from pathlib import Path
 
 import strava_cache
+import training_plan
 
 WEB = Path(__file__).resolve().parent / "web"
 
@@ -52,16 +53,6 @@ NAMES = {z[0]: z[1] for z in ZONES} | {"nohr": "No heart rate"}
 COLORS = {"easy": 1, "moderate": 2, "threshold": 3, "hard": 4, "nohr": 0}
 ORDER = ["easy", "moderate", "threshold", "hard", "nohr"]
 
-# The threshold session gets longer every 2 weeks.
-PROGRESSION = [
-    ("6 × 3 min", "1 min easy jog"),
-    ("5 × 5 min", "1 min easy jog"),
-    ("4 × 7 min", "1 min easy jog"),
-    ("3 × 10 min", "1½ min easy jog"),
-]
-
-# Which weekday each session lands on (Monday = 0). Override in config.json.
-DEFAULT_PLAN_DAYS = {"threshold": 1, "easy": 3, "long": 6}
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 SHORT_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -227,112 +218,48 @@ def card(body, cls="", head=None, link=None):
 
 # ------------------------------------------------------------------- 2. plan
 
-def week_number_for(monday, plan_start):
-    """Plan week 1 is the week of plan_start; anything before it counts as week 1."""
-    return max((monday - plan_start).days // 7 + 1, 1)
+DAY_INDEX = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
 
-def plan_week_number(config, today):
-    """(week number, the Monday the plan starts, True if the plan has not started yet)."""
-    start = date.fromisoformat(config.get("plan_start", today.isoformat()))
-    start -= timedelta(days=start.weekday())
-    monday = today - timedelta(days=today.weekday())
-    return week_number_for(monday, start), start, monday < start
+# "10 min oppvarming + 5×6 min, p: 90 sek + 5 min nedjogg" -> the set in the
+# title, warm-up and cool-down in the notes, so a week reads at a glance.
+WRAPPED = re.compile(r"^(\d+(?:–\d+)? min (?:oppvarming|svært lett jogg)) \+ (.+) \+ "
+                     r"(\d+(?:–\d+)? min (?:nedjogg|svært lett jogg|rolig jogg))$")
 
 
-def threshold_step(week_no):
-    """The threshold session for a plan week, plus which step of the progression it is."""
-    step = min((week_no - 1) // 2, len(PROGRESSION) - 1)
-    return step, PROGRESSION[step]
+def split_title(title, detail):
+    m = WRAPPED.match(title)
+    if not m:
+        return title, detail
+    warm, core, cool = m.groups()
+    frame = f"{warm[0].upper()}{warm[1:]} før, {cool} etter."
+    return core[0].upper() + core[1:], f"{frame}\n{detail}" if detail else frame
 
 
-def week_sessions(week_no, monday, max_hr, config):
-    """The three planned sessions of a week, as dicts, ordered by day."""
-    days = {**DEFAULT_PLAN_DAYS, **config.get("plan_days", {})}
-    _, (session, rest) = threshold_step(week_no)
-    thr_lo, thr_hi = bpm(max_hr, 82), bpm(max_hr, 88) - 1
-    easy_max = bpm(max_hr, 75)
-    plan = [
-        {"key": "threshold", "zone": "threshold", "title": f"{session} threshold",
-         "short": "Thr", "long_name": "Threshold", "reps": session, "target": f"{thr_lo}–{thr_hi} bpm",
-         "detail": f"15 min easy warm-up, then {session} at <b>{thr_lo}–{thr_hi} bpm</b> with {rest} "
-                   f"between, then 10 min easy. Stay in the lower half of that range - it should feel "
-                   f"comfortably hard, like you could do one more rep. Heart rate rises slowly, so "
-                   f"don't chase the number in the first minute."},
-        {"key": "easy", "zone": "easy", "title": "Easy · 40–50 min",
-         "short": "Easy", "long_name": "Easy run", "reps": "40–50 min", "target": f"under {easy_max} bpm",
-         "detail": f"Heart rate <b>under {easy_max} bpm</b> the whole way. Slow down or walk the hills "
-                   f"if you need to. This should feel almost too easy."},
-        {"key": "long", "zone": "easy", "title": "Long · 60–75 min",
-         "short": "Long", "long_name": "Long run", "reps": "60–75 min", "target": f"under {easy_max} bpm",
-         "detail": f"Same rule: <b>under {easy_max} bpm</b>. This builds the engine that makes the "
-                   f"threshold work pay off. Time on your feet matters more than pace."},
-    ]
-    for s in plan:
-        s["weekday"] = days.get(s["key"], DEFAULT_PLAN_DAYS[s["key"]])
-        s["date"] = monday + timedelta(days=s["weekday"])
-        s["run"] = None
-    return sorted(plan, key=lambda s: s["weekday"])
-
-
-PLAN_WEEKS_AHEAD = 16
-
-
-def standard_plan(config, max_hr, today):
+def standard_plan(today, days_back=140):
     """
-    The standard plan as a list of sessions, the form the Plan page edits:
-    from four weeks back until at least 16 weeks ahead. Ids are stable
-    ('2026-W40-threshold'), so an edited plan can tell sessions apart.
+    His training plan (training_plan.py) as the list of sessions the Plan page
+    edits. Only from `days_back` days ago: older sessions have no runs in the
+    data to tick them off, and would look missed when they were not.
+    Ids are stable ('2026-W40-2'), so an edited plan can tell sessions apart.
     """
-    _, start, _ = plan_week_number(config, today)
-    this_monday = today - timedelta(days=today.weekday())
-    first = this_monday - timedelta(weeks=4)
-    last = max(start + timedelta(weeks=PLAN_WEEKS_AHEAD), this_monday + timedelta(weeks=PLAN_WEEKS_AHEAD))
-    out, monday = [], first
-    while monday <= last:
-        wk = week_number_for(monday, start)
-        for sess in week_sessions(wk, monday, max_hr, config):
-            iso = monday.isocalendar()
-            out.append({"id": f"{iso[0]}-W{iso[1]:02d}-{sess['key']}", "date": sess["date"].isoformat(),
-                        "type": sess["key"], "title": sess["title"],
-                        "detail": re.sub(r"<[^>]+>", "", sess["detail"])})
-        monday += timedelta(weeks=1)
-    return {"sessions": out, "until": (last + timedelta(days=6)).isoformat()}
-
-
-def match_runs_to_sessions(sessions, runs):
-    """Tie the week's actual runs to the planned sessions. Returns the leftovers."""
-    left = sorted(runs, key=lambda r: r["_date"])
-    for s in sessions:                                   # 1. same weekday wins
-        for r in left:
-            if r["_date"].weekday() == s["weekday"]:
-                s["run"], left = r, [x for x in left if x is not r]
-                break
-    for s in sessions:                                   # 2. a quality run fills the threshold slot
-        if s["key"] == "threshold" and not s["run"]:
-            for r in left:
-                if r["_zone"] in ("threshold", "hard"):
-                    s["run"], left = r, [x for x in left if x is not r]
-                    break
-    for s in sorted(sessions, key=lambda s: s["key"] != "long"):   # 3. longest leftover -> long run
-        if not s["run"] and left:
-            pick = max(left, key=lambda r: r["moving_time"]) if s["key"] == "long" else left[0]
-            s["run"], left = pick, [x for x in left if x is not pick]
-    return left
-
-
-def next_session(sessions, today):
-    """The session to point at on the front page: today's, then the next one, then anything missed."""
-    for s in sessions:
-        if not s["run"] and s["date"] == today:
-            return s, "today"
-    for s in sessions:
-        if not s["run"] and s["date"] > today:
-            return s, "upcoming"
-    for s in sessions:
-        if not s["run"] and s["date"] < today:
-            return s, "missed"
-    return None, "done"
+    first = today - timedelta(days=days_back)
+    out, last = [], None
+    for week, sessions in sorted(training_plan.WEEKS.items()):
+        monday = date.fromisocalendar(training_plan.YEAR, week, 1)
+        for n, (day, kind, title, detail, optional) in enumerate(sessions, 1):
+            when = monday + timedelta(days=DAY_INDEX[day])
+            last = monday + timedelta(days=6)
+            if when < first:
+                continue
+            title, detail = split_title(title, detail)
+            item = {"id": f"{training_plan.YEAR}-W{week:02d}-{n}", "date": when.isoformat(), "type": kind,
+                    "title": title, "detail": detail}
+            if optional:
+                item["opt"] = True
+            out.append(item)
+    return {"sessions": out, "until": last.isoformat() if last else today.isoformat(),
+            "version": training_plan.VERSION}
 
 
 def coach_note(run, max_hr):
@@ -517,7 +444,6 @@ def zone_bar(zone_seconds):
 
 def page_home(d):
     max_hr, today = d["max_hr"], d["today"]
-    nxt, state = d["next"], d["next_state"]
 
     # ---- key numbers
     trend = f'avg {d["avg4"]:.1f} km' if d["avg4"] > 0.5 else 'building up'
@@ -579,17 +505,12 @@ def page_plan(d):
         '<div class="plan-foot"><span class="hint" id="planstatus"></span>'
         '<button type="button" class="more" id="planreset" hidden>Back to the standard plan</button></div>')
 
-    step_now, _ = threshold_step(d["week_no"])
-    steps = "".join(
-        f'<div class="step{" now" if i == step_now else ""}">'
-        f'<span class="pill">Week {i*2+1}–{i*2+2}</span><b>{reps}</b>'
-        f'<span class="rest">{rest} between</span>'
-        f'{"<span class=nowtag>You are here</span>" if i == step_now else ""}</div>'
-        for i, (reps, rest) in enumerate(PROGRESSION))
-    prog_body = (f'<div class="steps">{steps}</div>'
-                 f'<p class="hint">The threshold session grows every two weeks. Repeat a step instead of '
-                 f'moving on if the last one felt hard or the heart rate crept above '
-                 f'{bpm(max_hr, 88) - 1} bpm.</p>')
+    guide = "".join(f'<div class="guide-item"><b>{escape(head)}</b><p>{escape(text)}</p></div>'
+                    for head, text in training_plan.GUIDE)
+    guide_body = (f'<div class="guide">{guide}</div>'
+                  f'<p class="hint">Threshold for you is about {bpm(max_hr, 82)}–{bpm(max_hr, 88) - 1} bpm, low '
+                  f'threshold the bottom of that - around {bpm(max_hr, 82) - 1}–{bpm(max_hr, 84)}. Heart rate lags '
+                  f'at the start of a rep, so run the first minute by feel.</p>')
 
     zone_rows = "".join(
         f'<tr><td class="wrap">{dot(k)}<b>{label}</b><div class="desc">{why}</div></td>'
@@ -599,7 +520,7 @@ def page_plan(d):
                   f'<p class="hint">Based on a max heart rate of {max_hr} bpm.</p>')
 
     return (card(calendar, cls="calcard")
-            + card(prog_body, head="Threshold progression")
+            + card(guide_body, head="How this plan works")
             + card(zones_body, head="Your heart rate zones"))
 
 
@@ -744,8 +665,6 @@ def page_settings(d):
         f'<input type="number" id="setmaxhr" min="120" max="230" value="{d["max_hr"]}"></label>'
         f'<p class="hint">Every zone is worked out from this. {bpm(d["max_hr"], 82)}–'
         f'{bpm(d["max_hr"], 88) - 1} bpm is your threshold band today.</p>'
-        f'<label class="field"><span>Plan week 1 starts</span>'
-        f'<input type="date" id="setstart" value="{d["plan_start"].isoformat()}"></label>'
         f'<div class="noterow"><button type="button" id="savetraining">Save</button>'
         f'<span class="hint" id="trainingstatus"></span></div>'
         f'<p class="hint">These change how the dashboard is built, so they appear after the '
@@ -948,11 +867,6 @@ def prepare(activities, config, details=None):
         if monday in week_km:
             week_km[monday][r["_zone"]] += r["distance"] / 1000
 
-    week_no, plan_start, before_start = plan_week_number(config, today)
-    sessions = week_sessions(week_no, this_monday, max_hr, config)
-    this_week_runs = sorted(week_runs[this_monday], key=lambda r: r["_date"])
-    extra_runs = match_runs_to_sessions(sessions, this_week_runs)
-    nxt, next_state = next_session(sessions, today)
 
     cutoff = datetime.combine(today - timedelta(days=27), datetime.min.time())
     recent = [r for r in runs if r["_date"] >= cutoff]
@@ -1020,11 +934,8 @@ def prepare(activities, config, details=None):
 
     return {
         "max_hr": max_hr, "runs": runs, "today": today, "this_monday": this_monday,
-        "weeks": weeks, "week_km": week_km, "week_no": week_no, "plan_start": plan_start,
-        "before_start": before_start,
-        "week_label": "Warm-up week" if before_start else f"Week {week_no}",
-        "days_to_start": max((plan_start - today).days, 0),
-        "sessions": sessions, "extra_runs": extra_runs, "next": nxt, "next_state": next_state,
+        "weeks": weeks, "week_km": week_km,
+        "week_label": f"Week {today.isocalendar()[1]}",
         "this_week_km": sum(week_km[this_monday].values()),
         "avg4": sum(sum(week_km[w].values()) for w in weeks[-5:-1]) / 4,
         "runs28": len(recent), "zone_seconds": zone_seconds, "easy_share": easy_share,
@@ -1035,7 +946,6 @@ def prepare(activities, config, details=None):
         "long_drift": long_drift, "ef_now": ef_now, "ef_before": ef_before, "cad_now": cad_now,
         "updated": config.get("updated", datetime.now().strftime("%d.%m.%Y %H:%M")),
         "version": config.get("version", "dev"),
-        "plan_days": {**DEFAULT_PLAN_DAYS, **config.get("plan_days", {})},
     }
 
 
@@ -1043,7 +953,7 @@ def render(activities, config, details=None, notes=None, plan=None):
     d = prepare(activities, config, details)
     heads = {
         "home": ("Training", f'{d["week_label"]} · updated {d["updated"]}'),
-        "plan": ("Plan", "3 runs a week: one threshold session, two easy · Norwegian method"),
+        "plan": ("Plan", "Three runs a week: two at threshold, one long and easy · Marius Bakken's method"),
         "runs": ("Runs", "Your runs from Strava, last 140 days"),
         "map": ("Map", "Every run on one map"),
         "progress": ("Progress", f'Max heart rate {d["max_hr"]} bpm · updated {d["updated"]}'),
@@ -1061,13 +971,12 @@ def render(activities, config, details=None, notes=None, plan=None):
     conf = {"maxhr": d["max_hr"], "zones": [[k, label, lo, hi] for k, label, lo, hi, _ in ZONES],
             "names": NAMES, "colors": COLORS, "order": ORDER, "days": WEEKDAYS,
             "repo": config.get("repo", ""), "version": d["version"],
-            "planDays": d["plan_days"], "maxhrSet": d["max_hr"], "today": d["today"].isoformat(),
-            "planStart": d["plan_start"].isoformat()}
+            "today": d["today"].isoformat()}
     # "</" is escaped so a run named "</script>" cannot break out of the tag
     blob = lambda obj: json.dumps(obj, separators=(",", ":")).replace("</", "<\\/")
     data = (f'<script>window.CONF={blob(conf)};window.RUNS={blob(runs_payload(d))};'
             f'window.NOTES={blob(notes or {})};'
-            f'window.PLAN={blob({"standard": standard_plan(config, d["max_hr"], d["today"]), "saved": plan})};</script>')
+            f'window.PLAN={blob({"standard": standard_plan(d["today"]), "saved": plan})};</script>')
     nav = "".join(f'<a href="#/{key}">{icon(key)}<span>{label}</span></a>' for key, label in PAGES)
 
     return f"""<!doctype html>
