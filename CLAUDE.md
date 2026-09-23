@@ -33,8 +33,10 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   The **run page (`#/run/<id>`)** is the one part drawn in the browser instead of in Python: the runs are
   embedded once as JSON (`window.RUNS`) and `RUN_VIEW` renders map, charts, laps and splits from it - far
   smaller than shipping 50 pre-rendered run pages. The map is drawn from `summary_polyline` onto
-  OpenStreetMap tiles by hand (web-mercator maths in `RUN_VIEW`); there is **no Leaflet and no third-party
-  JavaScript**, and with no network the route still draws on a blank background.
+  raster tiles by hand (web-mercator maths in `RUN_VIEW`); there is **no Leaflet and no third-party
+  JavaScript**, and with no network the route still draws on a blank background. Four basemaps: **Plain**
+  (Esri Canvas), **Soft** (CARTO Positron / Dark Matter), **Streets** (OSM) and **Satellite** (Esri); the two
+  grey ones swap to a dark version with the app's appearance.
   Time in zones comes from the cached bpm histogram (real seconds per zone), not from a run's average.
   **Route styles (23.09.2026)** – the line can be drawn five ways, picked with the button at the bottom
   right of the map and remembered per device in `pref-route`: *Solid* (a line with a contrasting casing
@@ -113,17 +115,18 @@ What each page holds now, and what is still missing:
    that sync between devices.
 4. **Progress** – weekly volume, time in zones, easy pace at easy HR, threshold-session pace over time.
    **Still to do: best efforts (1k/5k/10k) and run-vs-run comparison.**
-**Better maps – settled 23.09.2026: staying with raster tiles.** He likes the Plain style; the route styles
-above were added instead of changing provider. Vendoring MapLibre was considered and rejected - ~40k lines
-to keep patched forever, and it would run beside the dashboard password in the browser. What was found:
-  * **CARTO Positron / Dark Matter** (the obvious clean choice) **now needs a free API key**; without one the
-    tiles carry an "API key required" watermark. Doable but it puts a key in the page and needs him to register.
+**Better maps – settled 23.09.2026: staying with raster tiles.** The route styles above were added instead
+of changing provider. Vendoring MapLibre was considered and rejected - ~40k lines to keep patched forever,
+and it would run beside the dashboard password in the browser. What was found:
+  * **CARTO Positron / Dark Matter** is shipped as the **Soft** layer (23.09.2026). An earlier note here said
+    it needs an API key - **that was wrong**, and came from looking at CARTO's newer hosted product. The plain
+    raster CDN `{s}.basemaps.cartocdn.com/{light_all,dark_all}/{z}/{x}/{y}{r}.png` is keyless, which
+    `roboes/strava-local-heatmap-tool` uses exactly that way. It also serves **real retina tiles** (`{r}` →
+    `@2x`), so `SlippyMap.prototype.finer()` returns 0 for a layer marked `retina: true`: one crisp 256px tile
+    per position instead of four from a zoom deeper, which is sharper *and* a quarter of the requests.
   * **OpenFreeMap** is keyless, unlimited and free, but serves **vector** tiles, so it needs MapLibre GL JS
-    (~250 KB gzipped) vendored into the repo. That would give genuinely sharp maps at any zoom, proper
-    continuous pinch-zoom and much nicer styling - at the cost of the "no third-party JavaScript" property and
-    a real download. **Ask him before doing this.**
-  * Keyless raster alternatives (Esri canvas/imagery, OSM, CyclOSM) are what is shipped now; the retina trick
-    above is what most improved sharpness without changing provider.
+    (~250 KB gzipped) vendored into the repo. **Rejected, see above.**
+  * Keyless raster alternatives (Esri canvas/imagery, OSM, CyclOSM) are the other layers.
   Note: tile servers are unreachable from the test sandbox, so any new tile URL cannot be verified here - keep
   to well-known URL patterns and have him confirm on the phone.
 
@@ -131,8 +134,21 @@ to keep patched forever, and it would run beside the dashboard password in the b
 5. **Map page in the menu** – the tab and page exist (23.09.2026) but hold only a placeholder, on his
    instruction to finish the run map first and copy the style across. Still to do: a full-screen map showing
    more than one run, plus a **heat map** of where he runs most often. `SlippyMap` and `ROUTE_STYLES` are
-   both reusable; what is missing is a layer that draws many polylines and counts overlaps, which can then
-   feed `ramp()` the overlap count in place of a heart rate.
+   both reusable.
+   **How to draw the heat (settled 23.09.2026, from `roboes/strava-local-heatmap-tool`, which he sent):**
+   do **not** count overlaps. Draw every route as a thin, translucent line (that tool uses weight 1.0 at
+   opacity 0.6 on a dark basemap) and let the browser's own alpha blending do the work - roads run many times
+   stack up bright, a one-off stays faint. This is both simpler and better-looking than counting, and it
+   sidesteps a real problem: our routes come from `summary_polyline`, which is decimated per activity, so the
+   same road recorded twice gives two slightly different squiggles that would never share a segment to count.
+   The `Glow` style already layers strokes this way; the heat map is the same idea with no casing and a much
+   thinner core. Also worth copying from that tool: **tapping a line opens that activity** (for us, straight
+   to `#/run/<id>`) and a **filter** on which runs are shown.
+   Watch performance: 50 runs x a few hundred points each is tens of thousands of SVG segments, which will
+   drag badly on a phone. Expect to draw the heat layer to a `<canvas>` instead of SVG, keeping SVG only for
+   the single-run page. What is *not* worth taking from that tool: it is a desktop Python script that needs
+   Strava's **bulk export** zip and renders through Folium (= Leaflet = third-party JavaScript). We already
+   have the routes live from the API, and no-third-party-JS is a property worth keeping.
 6. **Settings page** – done 23.09.2026: appearance (light / dark / follow system), default map style, training
    settings (max HR, plan start, which weekday each session lands on), the GitHub token (moved here from the
    notes card), and an About card with the build version, a "check for update" button and a "clear this device"

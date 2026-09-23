@@ -1137,6 +1137,15 @@ RUN_VIEW = r"""
     { id: 'plain', name: 'Plain', max: 16, attrib: '© Esri, © OpenStreetMap',
       url: ESRI + 'Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
       darkUrl: ESRI + 'Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' },
+    /*
+     * CARTO's Positron and Dark Matter, the cleanest free basemaps there are.
+     * Keyless on this CDN, and it serves proper retina tiles ({r} becomes @2x),
+     * so a sharp screen gets one crisp tile instead of four from a zoom deeper.
+     */
+    { id: 'soft', name: 'Soft', max: 19, retina: true, subs: ['a', 'b', 'c', 'd'],
+      attrib: '© OpenStreetMap, © CARTO',
+      url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+      darkUrl: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png' },
     { id: 'streets', name: 'Streets', max: 19, attrib: '© OpenStreetMap',
       url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' },
     { id: 'satellite', name: 'Satellite', max: 19, attrib: 'Imagery © Esri',
@@ -1273,12 +1282,8 @@ RUN_VIEW = r"""
     if (set) return set === 'dark';
     return window.matchMedia('(prefers-color-scheme: dark)').matches;
   }
-  // Tiles are 256px pictures. On a phone screen that is two device pixels per CSS
-  // pixel they look soft, so fetch one zoom level deeper and draw them at half
-  // size - four sharper tiles in place of one blurry one.
+  // Device pixels per CSS pixel: 2 on a phone, where a plain 256px tile looks soft.
   var DPR = Math.min(2, Math.round(window.devicePixelRatio || 1));
-  var FINER = DPR >= 2 ? 1 : 0;
-  var TILE = 256 / (FINER ? 2 : 1);
 
   /*
    * A small slippy map, written by hand so the dashboard needs no third-party
@@ -1428,10 +1433,18 @@ RUN_VIEW = r"""
     this.render();
   };
 
+  // How many zoom levels deeper to fetch for a sharp screen. A provider that
+  // serves retina tiles itself needs none: it gives one crisp tile for the
+  // level we are on. The rest are faked with four tiles from a level deeper.
+  SlippyMap.prototype.finer = function () {
+    return (DPR >= 2 && !this.layer.retina) ? 1 : 0;
+  };
+
   SlippyMap.prototype.tileUrl = function (x, y, z) {
     var n = Math.pow(2, z), wx = ((x % n) + n) % n;
     var url = (this.layer.darkUrl && isDark()) ? this.layer.darkUrl : this.layer.url;
     return url.replace('{z}', z).replace('{x}', wx).replace('{y}', y)
+      .replace('{r}', (this.layer.retina && DPR >= 2) ? '@2x' : '')
       .replace('{s}', this.layer.subs ? this.layer.subs[(wx + y) % this.layer.subs.length] : 'a');
   };
 
@@ -1439,7 +1452,8 @@ RUN_VIEW = r"""
     var s = this.size(), w = s[0], h = s[1];
     var left = this.cx - w / 2, top = this.cy - h / 2;
     // Tiles come from one zoom deeper on a sharp screen, drawn at half size.
-    var tz = Math.min(this.z + FINER, this.layer.max + FINER), n = Math.pow(2, tz);
+    var f = this.finer();
+    var tz = Math.min(this.z + f, this.layer.max + f), n = Math.pow(2, tz);
     var scale = Math.pow(2, tz - this.z);       // world pixels per css pixel
     var tileCss = 256 / scale;
     var x0 = Math.floor(left * scale / 256), x1 = Math.floor((left + w) * scale / 256);
