@@ -93,6 +93,64 @@ def run_kind(run):
     return "long" if run.get("moving_time", 0) >= 55 * 60 else "easy"
 
 
+# Edwards' heart-rate load: each minute counts 1-5 by how hard it was.
+EFFORT_BANDS = [(50, 60, 1), (60, 70, 2), (70, 80, 3), (80, 90, 4), (90, 101, 5)]
+
+
+def effort_of(run, max_hr):
+    """Heart-rate load for one run (Edwards' TRIMP). Exact from the cached
+    seconds-per-bpm histogram; from the average heart rate when there is none."""
+    hist = (run.get("_detail") or {}).get("hrhist")
+    score = 0.0
+    if hist:
+        for i, secs in enumerate(hist):
+            pct = (strava_cache.HR_MIN + i) / max_hr * 100
+            for lo, hi, w in EFFORT_BANDS:
+                if lo <= pct < hi:
+                    score += secs / 60 * w
+        return round(score)
+    hr = run.get("average_heartrate")
+    if not hr:
+        return None
+    pct = hr / max_hr * 100
+    w = next((w for lo, hi, w in EFFORT_BANDS if lo <= pct < hi), 0)
+    return round(run["moving_time"] / 60 * w)
+
+
+def rep_pace(run, max_hr):
+    """(seconds per km, average bpm) over the laps run at threshold or above -
+    the reps of an interval session without the warm-up and the jogs."""
+    laps = (run.get("_detail") or {}).get("laps") or []
+    reps = [l for l in laps if l.get("hr") and l["hr"] >= max_hr * 0.82 and l.get("m", 0) >= 300]
+    if len(reps) < 2:
+        return None
+    m, secs = sum(l["m"] for l in reps), sum(l["s"] for l in reps)
+    return secs / (m / 1000), sum(l["hr"] * l["s"] for l in reps) / secs
+
+
+def decoupling(run):
+    """Aerobic decoupling (Pa:HR): how much less distance each heartbeat buys in
+    the second half than the first, in %. Under 5% means the heart rate held
+    steady for the pace - good aerobic endurance. The first 10 minutes are left
+    out, while heart rate is still climbing."""
+    det = run.get("_detail") or {}
+    t, d, hr = det.get("t") or [], det.get("d") or [], det.get("hr") or []
+    if len(t) < 40 or len(hr) != len(t) or len(d) != len(t) or t[-1] < 45 * 60:
+        return None
+    idx = [i for i in range(len(t)) if t[i] >= 600 and hr[i] and d[i] is not None]
+    if len(idx) < 20:
+        return None
+    half = t[idx[0]] + (t[idx[-1]] - t[idx[0]]) / 2
+    def ef(part):
+        if len(part) < 5:
+            return None
+        dist, secs = d[part[-1]] - d[part[0]], t[part[-1]] - t[part[0]]
+        beats = sum(hr[i] for i in part) / len(part)
+        return dist / secs / beats if secs and beats else None
+    a, b = ef([i for i in idx if t[i] <= half]), ef([i for i in idx if t[i] > half])
+    return round((a - b) / a * 100, 1) if a and b else None
+
+
 def zones_from_histogram(hist, max_hr):
     """Seconds per zone from the cached bpm histogram - the honest version of
     zone_of(), because a threshold session is not one single zone."""
@@ -273,46 +331,133 @@ def coach_note(run, max_hr):
 
 # ----------------------------------------------------------------- 3. charts
 
-def weekly_chart(weeks, week_km):
-    """Stacked bars: one per week, split by the zone each run fell in."""
-    W, H, left, bottom, top = 760, 260, 44, 30, 12
+def dot_mark(cx, cy, cls="pt"):
+    """A data dot that stays the same size on screen however far the chart is
+    scaled: a zero-length line with a round cap and a non-scaling stroke. A
+    circle's radius would shrink with the chart and end up ~2 px on a phone.
+    Includes a surface-coloured ring and a 28 px touch target."""
+    a = f'x1="{cx:.1f}" y1="{cy:.1f}" x2="{cx + 0.01:.2f}" y2="{cy:.1f}"'
+    return f'<line {a} class="hitdot"/><line {a} class="ptring"/><line {a} class="{cls}"/>'
+
+
+def column_chart(weeks, values, label, fmt=lambda v: f"{v:.0f}", tip=None, bands=None, unit=""):
+    """One column per week. The current week is the accent; earlier weeks are
+    quiet context. `bands` = {week: (lo, hi)} draws a usual-range wash behind."""
+    W, H, left, bottom, top = 760, 230, 58, 28, 14
     plot_w, plot_h = W - left - 8, H - bottom - top
-    peak = max([sum(v.values()) for v in week_km.values()] + [10])
-    step = 10 if peak <= 60 else 20
+    peak = max([v for v in values.values() if v] + [hi for lo, hi in (bands or {}).values()] + [1])
+    step = next(s for s in (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000) if peak / s <= 5)
     y_max = (int(peak // step) + 1) * step
     slot = plot_w / len(weeks)
-    bar_w = min(28, slot * 0.6)
-    y = lambda km: top + plot_h - km / y_max * plot_h
+    bar_w = min(24, slot * 0.62)
+    y = lambda v: top + plot_h - v / y_max * plot_h
     svg = []
     for t in range(0, y_max + 1, step):
         svg.append(f'<line x1="{left}" x2="{W-8}" y1="{y(t):.1f}" y2="{y(t):.1f}" class="grid"/>'
-                   f'<text x="{left-6}" y="{y(t)+4:.1f}" class="tick" text-anchor="end">{t}</text>')
+                   f'<text x="{left-6}" y="{y(t)+4:.1f}" class="tick" text-anchor="end">{fmt(t)}</text>')
     for i, w in enumerate(weeks):
-        x = left + i * slot + (slot - bar_w) / 2
-        total = sum(week_km[w].values())
-        segs = [(k, week_km[w][k]) for k in ORDER if week_km[w][k] > 0]
-        tip = f"Week of {w.strftime('%d.%m')}: {total:.1f} km" + "".join(
-            f"|{NAMES[k]}: {v:.1f} km" for k, v in segs)
-        svg.append(f'<g class="wk" data-tip="{escape(tip)}">'
-                   f'<rect x="{left + i*slot:.1f}" y="{top}" width="{slot:.1f}" height="{plot_h}" class="hit"/>')
-        base = 0.0
-        for n, (k, v) in enumerate(segs):
-            y0, y1 = y(base), y(base + v)
-            last = n == len(segs) - 1
-            h = max(y0 - y1 - (0 if last else 2), 1)
-            svg.append(f'<rect x="{x:.1f}" y="{y1:.1f}" width="{bar_w:.1f}" height="{h:.1f}" '
-                       f'rx="{4 if last else 0}" class="s{COLORS[k]}"/>')
-            if last and h > 4:  # square off the bottom corners of the rounded top segment
-                svg.append(f'<rect x="{x:.1f}" y="{y1 + h - 4:.1f}" width="{bar_w:.1f}" height="4" '
-                           f'class="s{COLORS[k]}"/>')
-            base += v
+        x0 = left + i * slot
+        x = x0 + (slot - bar_w) / 2
+        v = values.get(w) or 0
+        band = (bands or {}).get(w)
+        if band:
+            svg.append(f'<rect x="{x0 + 2:.1f}" y="{y(band[1]):.1f}" width="{slot - 4:.1f}" '
+                       f'height="{max(y(band[0]) - y(band[1]), 1):.1f}" class="rangeband"/>')
+        text = tip(w, v) if tip else f"Week of {w.strftime('%d.%m')}|{fmt(v)}{unit}"
+        cls = "col now" if i == len(weeks) - 1 else "col"
+        svg.append(f'<g class="wk" data-tip="{escape(text)}">'
+                   f'<rect x="{x0:.1f}" y="{top}" width="{slot:.1f}" height="{plot_h}" class="hit"/>')
+        if v > 0:
+            h = max(y(0) - y(v), 2)
+            r = min(4, h / 2)
+            # rounded top, square foot: a path, so the corners sit only where the data ends
+            svg.append(f'<path class="{cls}" d="M{x:.1f} {y(0):.1f}V{y(v) + r:.1f}Q{x:.1f} {y(v):.1f} {x + r:.1f} {y(v):.1f}'
+                       f'H{x + bar_w - r:.1f}Q{x + bar_w:.1f} {y(v):.1f} {x + bar_w:.1f} {y(v) + r:.1f}V{y(0):.1f}Z"/>')
         if (len(weeks) - 1 - i) % 3 == 0:
             anchor = "start" if i == 0 else "end" if i == len(weeks) - 1 else "middle"
             svg.append(f'<text x="{x + bar_w/2:.1f}" y="{H-8}" class="tick" text-anchor="{anchor}">'
                        f'{w.strftime("%d.%m")}</text>')
         svg.append("</g>")
     svg.append(f'<line x1="{left}" x2="{W-8}" y1="{y(0):.1f}" y2="{y(0):.1f}" class="axis"/>')
-    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Weekly running distance by intensity">'
+    return f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{escape(label)}">{"".join(svg)}</svg>'
+
+
+def dot_trend(points, label, fmt, invert=False, pad=0.15, guide=None):
+    """Dots over time with a rolling average line through them.
+    points = [(date, value, tooltip)]. `invert` puts small values on top (pace).
+    `guide` = (value, text) draws one labelled reference line."""
+    if len(points) < 3:
+        return '<p class="sub">Not enough runs yet - this fills in after a few weeks.</p>'
+    W, H, left, bottom, top = 760, 240, 66, 30, 16
+    plot_w, plot_h = W - left - 12, H - bottom - top
+    vals = [v for _, v, _ in points] + ([guide[0]] if guide else [])
+    lo, hi = min(vals), max(vals)
+    span = max(hi - lo, abs(hi) * 0.04, 1e-6)
+    lo, hi = lo - span * pad, hi + span * pad
+    d0, d1 = points[0][0], points[-1][0]
+    days = max((d1 - d0).days, 1)
+    x = lambda d: left + 14 + (plot_w - 28) * (d - d0).days / days      # dots clear of the axis labels
+    y = lambda v: (top + (v - lo) / (hi - lo) * plot_h) if invert else (top + plot_h - (v - lo) / (hi - lo) * plot_h)
+    svg = []
+    for t in range(4):
+        v = lo + (hi - lo) * (t + 0.5) / 4
+        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="grid"/>'
+                   f'<text x="{left-6}" y="{y(v)+4:.1f}" class="tick" text-anchor="end">{fmt(v)}</text>')
+    if guide:
+        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(guide[0]):.1f}" y2="{y(guide[0]):.1f}" class="guide"/>'
+                   f'<text x="{W-14}" y="{y(guide[0])-5:.1f}" class="tick" text-anchor="end">{escape(guide[1])}</text>')
+    # rolling mean of the 5 nearest runs, so one odd run does not bend the story
+    roll = []
+    for i in range(len(points)):
+        win = [v for _, v, _ in points[max(0, i - 2):i + 3]]
+        roll.append(sum(win) / len(win))
+    svg.append('<polyline class="line" points="' +
+               " ".join(f"{x(d):.1f},{y(v):.1f}" for (d, _, _), v in zip(points, roll)) + '"/>')
+    for d, v, tip in points:
+        svg.append(f'<g class="wk" data-tip="{escape(tip)}">{dot_mark(x(d), y(v), "pt soft")}</g>')
+    for d in (d0, d0 + (d1 - d0) / 2, d1):
+        anchor = "start" if d == d0 else "end" if d == d1 else "middle"
+        svg.append(f'<text x="{x(d):.1f}" y="{H-8}" class="tick" text-anchor="{anchor}">{d.strftime("%d.%m")}</text>')
+    return f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{escape(label)}">{"".join(svg)}</svg>'
+
+
+def speed_hr_chart(points, max_hr):
+    """Each run as a dot: average heart rate across, average pace up (faster
+    higher). Runs from the last four weeks in the accent, older runs grey.
+    points = [(bpm, sec_per_km, tooltip, recent)]."""
+    if len(points) < 4:
+        return '<p class="sub">Not enough runs with heart rate yet.</p>'
+    W, H, left, bottom, top = 760, 320, 66, 36, 26
+    plot_w, plot_h = W - left - 12, H - bottom - top
+    hrs = [p[0] for p in points]
+    paces = [p[1] for p in points]
+    x0, x1 = min(hrs) - 4, max(hrs) + 4
+    p_lo, p_hi = min(paces), max(paces)
+    pad = max((p_hi - p_lo) * 0.12, 5)
+    p_lo, p_hi = p_lo - pad, p_hi + pad
+    x = lambda v: left + (v - x0) / (x1 - x0) * plot_w
+    y = lambda v: top + (v - p_lo) / (p_hi - p_lo) * plot_h          # faster pace sits higher
+    svg = []
+    # the zone boundaries, so you can see which runs strayed into the grey zone
+    for key, name, lo, hi, _ in ZONES:
+        a, b = max(bpm(max_hr, lo), x0), min(bpm(max_hr, hi), x1)
+        if b <= a:
+            continue
+        svg.append(f'<rect x="{x(a):.1f}" y="{top}" width="{x(b) - x(a):.1f}" height="{plot_h}" class="zband z{key}"/>'
+                   f'<text x="{(x(a) + x(b)) / 2:.1f}" y="{top - 7}" class="tick zname" text-anchor="middle">{name}</text>')
+    for t in range(4):
+        v = p_lo + (p_hi - p_lo) * (t + 0.5) / 4
+        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="grid"/>'
+                   f'<text x="{left-6}" y="{y(v)+4:.1f}" class="tick" text-anchor="end">{int(v//60)}:{int(v%60):02d}</text>')
+    step = 10 if x1 - x0 > 40 else 5
+    for v in range(int(x0 // step + 1) * step, int(x1) + 1, step):
+        svg.append(f'<text x="{x(v):.1f}" y="{H-10}" class="tick" text-anchor="middle">{v}</text>')
+    for recent in (False, True):                                 # recent runs drawn on top
+        for hr, pc, tip, rec in points:
+            if rec != recent:
+                continue
+            svg.append(f'<g class="wk" data-tip="{escape(tip)}">{dot_mark(x(hr), y(pc), "pt" if rec else "pt old")}</g>')
+    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Pace against heart rate, one dot per run">'
             f'{"".join(svg)}</svg>')
 
 
@@ -335,36 +480,6 @@ def zone_bar(zone_seconds):
         f'<span class="num">{fmt_hours(zone_seconds[k])} · {zone_seconds[k]/total*100:.0f}%</span></div>'
         for k in ORDER if zone_seconds.get(k))
     return f'<div class="bar">{"".join(rows)}</div><div class="zlist">{legend}</div>'
-
-
-def trend_chart(points, label):
-    """Small line chart. points = [(x-label, value, tooltip)], value in seconds per km."""
-    if len(points) < 2:
-        return '<p class="sub">Not enough runs yet - this fills in after a few weeks.</p>'
-    W, H, left, bottom, top = 760, 200, 66, 30, 14
-    plot_w, plot_h = W - left - 10, H - bottom - top
-    vals = [p[1] for p in points]
-    lo, hi = min(vals), max(vals)
-    pad = max((hi - lo) * 0.25, 8)
-    lo, hi = lo - pad, hi + pad
-    x = lambda i: left + (plot_w * i / (len(points) - 1))
-    y = lambda v: top + plot_h - (v - lo) / (hi - lo) * plot_h
-    svg = []
-    for t in range(4):
-        v = lo + (hi - lo) * t / 3
-        svg.append(f'<line x1="{left}" x2="{W-10}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="grid"/>'
-                   f'<text x="{left-6}" y="{y(v)+4:.1f}" class="tick" text-anchor="end">'
-                   f'{int(v//60)}:{int(v%60):02d}</text>')
-    line = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, (_, v, _) in enumerate(points))
-    svg.append(f'<polyline points="{line}" class="line"/>')
-    for i, (lab, v, tip) in enumerate(points):
-        svg.append(f'<g class="wk" data-tip="{escape(tip)}">'
-                   f'<rect x="{x(i)-14:.1f}" y="{top}" width="28" height="{plot_h}" class="hit"/>'
-                   f'<circle cx="{x(i):.1f}" cy="{y(v):.1f}" r="4" class="pt"/></g>')
-        if i % max(1, len(points) // 6) == 0 or i == len(points) - 1:
-            anchor = "start" if i == 0 else "end" if i == len(points) - 1 else "middle"
-            svg.append(f'<text x="{x(i):.1f}" y="{H-8}" class="tick" text-anchor="{anchor}">{lab}</text>')
-    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{escape(label)}">{"".join(svg)}</svg>')
 
 
 # ------------------------------------------------------------------ 4. pages
@@ -586,7 +701,7 @@ def runs_payload(d):
             "hr": round(r["average_heartrate"]) if r.get("average_heartrate") else None,
             "mhr": round(r["max_heartrate"]) if r.get("max_heartrate") else None,
             "cad": round(r["average_cadence"] * 2) if r.get("average_cadence") else None,
-            "z": r["_zone"], "k": r["_kind"],
+            "z": r["_zone"], "k": r["_kind"], "re": r["_effort"],
             "poly": (r.get("map") or {}).get("summary_polyline") or "",
             "zs": {k: round(v) for k, v in r["_zone_seconds"].items() if v},
         }
@@ -715,29 +830,103 @@ def page_run(d):
 
 
 def page_progress(d):
-    used = [k for k in ORDER if any(d["week_km"][w][k] for w in d["weeks"])] or ["easy"]
-    legend = "".join(f'<span><i class="s{COLORS[k]}"></i>{NAMES[k]}</span>' for k in used)
-    volume = (f'<div class="legend">{legend}</div>{weekly_chart(d["weeks"], d["week_km"])}'
-              f'<p class="hint">Each bar is one week, coloured by the zone each run fell in. '
-              f'Blue should dominate.</p>')
+    max_hr, weeks, now = d["max_hr"], d["weeks"], d["this_monday"]
+
+    # ---- the headline numbers
+    effort, band = d["week_effort"].get(now, 0), d["effort_band"].get(now)
+    if band:
+        where = ("below" if effort < band[0] else "above" if effort > band[1] else "inside")
+        effort_note = f'usual {band[0]:.0f}–{band[1]:.0f} · {where}'
+    else:
+        effort_note = "this week so far"
+    ef_now, ef_before = d["ef_now"], d["ef_before"]
+    if ef_now and ef_before:
+        change = (ef_now / ef_before - 1) * 100
+        ef_note = f'{"+" if change >= 0 else "−"}{abs(change):.1f}% on the 4 weeks before'
+    else:
+        ef_note = "easy runs, 28 days"
+    cad_text = f'{d["cad_now"]:.0f}' if d["cad_now"] else "–"
+    ef_text = f"{ef_now:.2f}" if ef_now else "–"
+    tiles = (
+        '<div class="tiles four">'
+        f'<div class="tile"><div class="label">Effort this week</div><div class="value">{effort}</div>'
+        f'<div class="note">{effort_note}</div></div>'
+        f'<div class="tile"><div class="label">Easy share</div><div class="value">{d["easy_share"]}</div>'
+        f'<div class="note">28 days · goal ~80%</div></div>'
+        f'<div class="tile"><div class="label">Metres per beat</div>'
+        f'<div class="value">{ef_text}</div><div class="note">{ef_note}</div></div>'
+        f'<div class="tile"><div class="label">Cadence</div>'
+        f'<div class="value">{cad_text}<span class="unit">spm</span></div>'
+        f'<div class="note">average, 28 days</div></div>'
+        '</div>')
+
+    # ---- load
+    def load_tip(w, v):
+        band = d["effort_band"].get(w)
+        runs_n = sum(1 for r in d["runs"] if r["_date"].date() - timedelta(days=r["_date"].weekday()) == w)
+        return (f"Week of {w.strftime('%d.%m')}|Effort {v:.0f} from {runs_n} run{'s' if runs_n != 1 else ''}"
+                + (f"|Usual range {band[0]:.0f}–{band[1]:.0f}" if band else ""))
+    load = (column_chart(weeks, d["week_effort"], "Weekly training load", tip=load_tip, bands=d["effort_band"])
+            + '<p class="hint">Effort is heart-rate load: every minute of running counted 1 to 5 by how hard it '
+              'was (Edwards\' method, from your strap second by second). The shaded band is your usual range - '
+              '75–125% of the three weeks before. Building a little at a time and staying near the band is what '
+              'lets the body absorb the work; a week far above it is where injuries come from.</p>')
+
+    km_tip = lambda w, v: f"Week of {w.strftime('%d.%m')}|{v:.1f} km"
+    distance = column_chart(weeks, {w: sum(d["week_km"][w].values()) for w in weeks}, "Weekly distance",
+                            fmt=lambda v: f"{v:.0f}", tip=km_tip)
 
     zones = (zone_bar(d["zone_seconds"]) +
              f'<p class="hint">Last 28 days, by moving time. The Norwegian method wants roughly 80% easy - '
              f'you are at {d["easy_share"]}.</p>')
 
-    eff = (trend_chart(d["easy_points"], "Easy-run pace over time") +
-           f'<p class="hint">Average pace of your easy runs each week, at an average heart rate that stays '
-           f'under {bpm(d["max_hr"], 75)} bpm. If the line drifts down while the heart rate stays put, '
-           f'the engine is getting better.</p>')
+    scatter = (speed_hr_chart(d["speed_hr"], max_hr) +
+               '<p class="hint">One dot per run: heart rate across, pace up. Blue dots are the last four weeks, '
+               'grey ones older. As you get fitter the cloud shifts up and left - faster at the same heart rate. '
+               'Dots in the grey zone column are the runs to slow down next time.</p>')
 
-    thr = (trend_chart(d["thr_points"], "Threshold-session pace over time") +
-           f'<p class="hint">Your threshold sessions, whole-session pace including warm-up and cool-down. '
-           f'Same heart rate at a faster pace is the clearest sign the threshold work is paying off.</p>')
+    efficiency = (dot_trend(d["eff_points"], "Metres per heartbeat on easy runs",
+                            lambda v: f"{v:.2f}") +
+                  '<p class="hint">How far you travel for each heartbeat on easy and long runs. A rising line is '
+                  'the aerobic engine improving - the main thing easy running is for. Heat, hills and tiredness '
+                  'pull single runs down, so watch the line, not the dots.</p>')
 
-    return (card(volume, head="Weekly distance (km)")
+    reps = (dot_trend(d["rep_points"], "Threshold rep pace", lambda v: f"{int(v//60)}:{int(v%60):02d}", invert=True) +
+            f'<p class="hint">Average pace of the reps only - the laps at threshold heart rate '
+            f'({bpm(max_hr, 82)}+ bpm) - so warm-up, jogs and cool-down do not blur it. Faster reps at the same '
+            f'controlled heart rate is the clearest sign the threshold work is paying off.</p>')
+
+    cadence = (dot_trend(d["cad_points"], "Cadence per run", lambda v: f"{v:.0f}") +
+               '<p class="hint">Steps per minute, both feet. There is no magic number - it rises naturally with '
+               'speed, so threshold days sit higher than easy days. What helps is a slow drift upwards on easy runs '
+               'over months: shorter, quicker steps land softer.</p>')
+
+    rows = []
+    for r, dc in d["long_drift"]:
+        good = dc < 5
+        w = max(3, min(max(dc, 0), 12) / 12 * 100)          # a negative drift is simply steady
+        rows.append(
+            f'<a class="driftrow" href="#/run/{r["id"]}"><span class="dname2">{r["_date"].strftime("%d.%m")} · '
+            f'{fmt_hours(r["moving_time"])}</span>'
+            f'<span class="dbar"><i class="{"dgood" if good else "dwarn"}" style="width:{w:.0f}%"></i><em></em></span>'
+            f'<span class="dval">{dc:+.1f}%</span>'
+            f'<span class="pill {"ok-pill" if good else "warn"}">{"✓ steady" if good else "! drifting"}</span></a>')
+    drift = ((f'<div class="drift">{"".join(rows)}</div>' if rows else
+              '<p class="sub">No long runs with heart-rate detail yet.</p>') +
+             '<p class="hint">Aerobic decoupling compares the second half of a long run with the first: how much '
+             'less distance each heartbeat buys once you are tired. Under 5% means your heart rate held steady for '
+             'the pace - good endurance. Higher means the run was a touch too fast or too long for now. The first '
+             '10 minutes are left out while heart rate settles. The marker on each bar is 5%.</p>')
+
+    return (tiles
+            + card(load, head="Training load")
+            + card(scatter, head="Speed against heart rate")
+            + card(efficiency, head="Aerobic efficiency")
             + card(zones, head="Time in zones")
-            + card(eff, head="Easy pace at easy heart rate")
-            + card(thr, head="Threshold sessions"))
+            + card(reps, head="Threshold reps")
+            + card(drift, head="Long runs: heart-rate drift")
+            + card(cadence, head="Cadence")
+            + card(distance, head="Weekly distance (km)"))
 
 
 # ------------------------------------------------------------- 5. the shell
@@ -783,6 +972,11 @@ def prepare(activities, config, details=None):
         r["_zone_seconds"] = (zones_from_histogram(hist, max_hr) if hist
                               else {r["_zone"]: r["moving_time"]})
         r["_kind"] = run_kind(r)
+        r["_effort"] = effort_of(r, max_hr)
+        hr = r.get("average_heartrate")
+        # metres covered per heartbeat: rises as the aerobic engine improves
+        r["_ef"] = (r["distance"] / r["moving_time"] * 60 / hr) if hr and r.get("moving_time") else None
+        r["_cad"] = round(r["average_cadence"] * 2) if r.get("average_cadence") else None
     runs.sort(key=lambda r: r["_date"], reverse=True)
 
     today = date.fromisoformat(config["today"]) if config.get("today") else date.today()
@@ -811,29 +1005,60 @@ def prepare(activities, config, details=None):
     hr_time = sum(v for k, v in zone_seconds.items() if k != "nohr")
     easy_share = f"{zone_seconds['easy'] / hr_time * 100:.0f}%" if hr_time else "-"
 
-    # pace trends: easy running per week, and each threshold session
-    easy_points = []
-    for w in weeks[-10:]:
-        easy = [r for r in week_runs.get(w, []) if r["_zone"] == "easy" and r["distance"]]
-        if len(easy) < 1:
-            continue
-        secs = sum(r["moving_time"] for r in easy)
-        km = sum(r["distance"] for r in easy) / 1000
-        hrs = [r["average_heartrate"] for r in easy if r.get("average_heartrate")]
-        pace = secs / km
-        tip = (f"Week of {w.strftime('%d.%m')}: {int(pace//60)}:{int(pace%60):02d} /km"
-               f"|{len(easy)} easy run{'s' if len(easy) != 1 else ''}, {km:.1f} km"
-               + (f"|Average {sum(hrs)/len(hrs):.0f} bpm" if hrs else ""))
-        easy_points.append((w.strftime("%d.%m"), pace, tip))
+    # ---- progress: load, efficiency, cadence, threshold reps, decoupling
+    week_effort = {w: sum(r["_effort"] or 0 for r in week_runs.get(w, [])) for w in weeks}
+    effort_band = {}
+    for i, w in enumerate(weeks):
+        prior = [week_effort[v] for v in weeks[max(0, i - 3):i] if week_effort[v]]
+        if len(prior) == 3:
+            avg = sum(prior) / 3
+            effort_band[w] = (avg * 0.75, avg * 1.25)
+    d28 = today - timedelta(days=27)
+    fmt_pc = lambda sec: f"{int(sec // 60)}:{int(sec % 60):02d}"
+    dated = sorted(runs, key=lambda r: r["_date"])
 
-    thr_points = []
-    for r in sorted([r for r in runs if r["_zone"] in ("threshold", "hard") and r["distance"]],
-                    key=lambda r: r["_date"])[-12:]:
-        pace = r["moving_time"] / (r["distance"] / 1000)
-        tip = (f"{r['_date'].strftime('%d.%m.%Y')}: {int(pace//60)}:{int(pace%60):02d} /km"
-               f"|{r['distance']/1000:.1f} km, {fmt_time(r['moving_time'])}"
-               f"|Average {hr_text(r)} bpm")
-        thr_points.append((r["_date"].strftime("%d.%m"), pace, tip))
+    speed_hr = [(r["average_heartrate"], r["moving_time"] / (r["distance"] / 1000),
+                 f'{escape(r["name"])}|{r["_date"].strftime("%d.%m.%Y")} · {r["distance"]/1000:.1f} km'
+                 f'|{fmt_pc(r["moving_time"] / (r["distance"] / 1000))} /km at {r["average_heartrate"]:.0f} bpm',
+                 r["_date"].date() >= d28)
+                for r in dated if r.get("average_heartrate") and r["distance"] >= 2000]
+
+    eff_points = [(r["_date"].date(), r["_ef"],
+                   f'{r["_ef"]:.2f} m per beat|{escape(r["name"])} · {r["_date"].strftime("%d.%m")}'
+                   f'|{fmt_pc(r["moving_time"] / (r["distance"] / 1000))} /km at {r["average_heartrate"]:.0f} bpm')
+                  for r in dated if r["_ef"] and r["_kind"] in ("easy", "long") and r["distance"] >= 3000]
+
+    cad_points = [(r["_date"].date(), r["_cad"],
+                   f'{r["_cad"]} steps/min|{escape(r["name"])} · {r["_date"].strftime("%d.%m")}'
+                   f'|{fmt_pc(r["moving_time"] / (r["distance"] / 1000))} /km')
+                  for r in dated if r["_cad"] and r["_cad"] > 120]
+
+    rep_points = []
+    for r in dated:
+        if r["_kind"] != "threshold":
+            continue
+        rp = rep_pace(r, max_hr)
+        if rp:
+            rep_points.append((r["_date"].date(), rp[0],
+                               f'{fmt_pc(rp[0])} /km in the reps|{escape(r["name"])} · {r["_date"].strftime("%d.%m")}'
+                               f'|Reps averaged {rp[1]:.0f} bpm'))
+
+    long_drift = []
+    for r in reversed(dated):
+        if r["_kind"] == "long":
+            dc = decoupling(r)
+            if dc is not None:
+                long_drift.append((r, dc))
+        if len(long_drift) == 8:
+            break
+
+    def avg(xs):
+        xs = [x for x in xs if x]
+        return sum(xs) / len(xs) if xs else None
+    ef_now = avg([r["_ef"] for r in recent if r["_kind"] in ("easy", "long")])
+    ef_before = avg([r["_ef"] for r in runs if r["_kind"] in ("easy", "long")
+                     and cutoff - timedelta(days=28) <= r["_date"] < cutoff])
+    cad_now = avg([r["_cad"] for r in recent])
 
     return {
         "max_hr": max_hr, "runs": runs, "today": today, "this_monday": this_monday,
@@ -847,7 +1072,9 @@ def prepare(activities, config, details=None):
         "runs28": len(recent), "zone_seconds": zone_seconds, "easy_share": easy_share,
         "detailed": sum(1 for r in runs if r["_detail"]),
         "latest": runs[0] if runs else None,
-        "easy_points": easy_points, "thr_points": thr_points,
+        "week_effort": week_effort, "effort_band": effort_band, "speed_hr": speed_hr,
+        "eff_points": eff_points, "cad_points": cad_points, "rep_points": rep_points,
+        "long_drift": long_drift, "ef_now": ef_now, "ef_before": ef_before, "cad_now": cad_now,
         "updated": config.get("updated", datetime.now().strftime("%d.%m.%Y %H:%M")),
         "version": config.get("version", "dev"),
         "plan_days": {**DEFAULT_PLAN_DAYS, **config.get("plan_days", {})},
