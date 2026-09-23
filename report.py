@@ -1,19 +1,25 @@
 """
 Turns a list of Strava activities into the dashboard.
 
-The dashboard is one HTML page with four sub-pages - Home, Plan, Runs, Progress -
-and a menu (bottom tab bar on a phone, sidebar on a desktop). Everything is
-rendered here and shipped in one encrypted file, so switching pages is instant
+The dashboard is one HTML page with six sub-pages - Home, Plan, Runs, Map,
+Progress, Settings - and a menu (bottom tab bar on a phone, sidebar on a
+desktop). It is shipped as one encrypted file, so switching pages is instant
 and works offline once opened.
 
+This file builds what is fixed at build time: the numbers, the Python-drawn
+SVG charts and the page skeletons. Everything interactive - the run page,
+maps, the plan calendar, settings - is browser code in web/*.js, which this
+file inlines in the order of APP_FILES.
+
 Layout of this file:
-  1. Settings and small helpers
-  2. The training plan (week structure, progression, matching runs to sessions)
+  1. Settings and small helpers (zones, effort, efficiency, decoupling)
+  2. The training plan (the standard plan, as data the Plan page edits)
   3. Charts (hand-built inline SVG)
-  4. The four pages
-  5. Shell: CSS, menu, router
+  4. The pages
+  5. Shell: menu, and the assembly of CSS and scripts
 """
 import json
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, date
 from html import escape
@@ -247,17 +253,17 @@ def week_sessions(week_no, monday, max_hr, config):
     thr_lo, thr_hi = bpm(max_hr, 82), bpm(max_hr, 88) - 1
     easy_max = bpm(max_hr, 75)
     plan = [
-        {"key": "threshold", "zone": "threshold", "title": f"Threshold session: {session}",
+        {"key": "threshold", "zone": "threshold", "title": f"{session} threshold",
          "short": "Thr", "long_name": "Threshold", "reps": session, "target": f"{thr_lo}–{thr_hi} bpm",
          "detail": f"15 min easy warm-up, then {session} at <b>{thr_lo}–{thr_hi} bpm</b> with {rest} "
                    f"between, then 10 min easy. Stay in the lower half of that range - it should feel "
                    f"comfortably hard, like you could do one more rep. Heart rate rises slowly, so "
                    f"don't chase the number in the first minute."},
-        {"key": "easy", "zone": "easy", "title": "Easy run: 40–50 min",
+        {"key": "easy", "zone": "easy", "title": "Easy · 40–50 min",
          "short": "Easy", "long_name": "Easy run", "reps": "40–50 min", "target": f"under {easy_max} bpm",
          "detail": f"Heart rate <b>under {easy_max} bpm</b> the whole way. Slow down or walk the hills "
                    f"if you need to. This should feel almost too easy."},
-        {"key": "long", "zone": "easy", "title": "Long easy run: 60–75 min",
+        {"key": "long", "zone": "easy", "title": "Long · 60–75 min",
          "short": "Long", "long_name": "Long run", "reps": "60–75 min", "target": f"under {easy_max} bpm",
          "detail": f"Same rule: <b>under {easy_max} bpm</b>. This builds the engine that makes the "
                    f"threshold work pay off. Time on your feet matters more than pace."},
@@ -267,6 +273,31 @@ def week_sessions(week_no, monday, max_hr, config):
         s["date"] = monday + timedelta(days=s["weekday"])
         s["run"] = None
     return sorted(plan, key=lambda s: s["weekday"])
+
+
+PLAN_WEEKS_AHEAD = 16
+
+
+def standard_plan(config, max_hr, today):
+    """
+    The standard plan as a list of sessions, the form the Plan page edits:
+    from four weeks back until at least 16 weeks ahead. Ids are stable
+    ('2026-W40-threshold'), so an edited plan can tell sessions apart.
+    """
+    _, start, _ = plan_week_number(config, today)
+    this_monday = today - timedelta(days=today.weekday())
+    first = this_monday - timedelta(weeks=4)
+    last = max(start + timedelta(weeks=PLAN_WEEKS_AHEAD), this_monday + timedelta(weeks=PLAN_WEEKS_AHEAD))
+    out, monday = [], first
+    while monday <= last:
+        wk = week_number_for(monday, start)
+        for sess in week_sessions(wk, monday, max_hr, config):
+            iso = monday.isocalendar()
+            out.append({"id": f"{iso[0]}-W{iso[1]:02d}-{sess['key']}", "date": sess["date"].isoformat(),
+                        "type": sess["key"], "title": sess["title"],
+                        "detail": re.sub(r"<[^>]+>", "", sess["detail"])})
+        monday += timedelta(weeks=1)
+    return {"sessions": out, "until": (last + timedelta(days=6)).isoformat()}
 
 
 def match_runs_to_sessions(sessions, runs):
@@ -488,66 +519,6 @@ def page_home(d):
     max_hr, today = d["max_hr"], d["today"]
     nxt, state = d["next"], d["next_state"]
 
-    # ---- next session
-    if nxt:
-        when = f'{day_word(nxt["date"], today)} · {nxt["date"].strftime("%d.%m")}'
-        badge = {"today": '<span class="pill hot">Today</span>',
-                 "upcoming": '<span class="pill">Next up</span>',
-                 "missed": '<span class="pill warn">Missed - fit it in</span>'}[state]
-        next_body = (f'<div class="nexthead"><span class="when">{when}</span>{badge}</div>'
-                     f'<h3>{nxt["title"]}</h3>'
-                     f'<p class="target">Target heart rate: <b>{nxt["target"]}</b></p>'
-                     f'<p class="detail">{nxt["detail"]}</p>')
-    else:
-        next_body = ('<div class="nexthead"><span class="when">This week</span>'
-                     '<span class="pill ok-pill">All done ✓</span></div>'
-                     '<h3>Week complete - rest up</h3>'
-                     '<p class="detail">All three sessions are in the bag. Easy days, sleep and food '
-                     'are what turn them into fitness. The next week starts Monday.</p>')
-    if d["before_start"]:
-        days = d["days_to_start"]
-        when = "tomorrow" if days == 1 else f"in {days} days" if days else "today"
-        next_body += (f'<p class="hint">Week 1 of the written plan starts Monday '
-                      f'{d["plan_start"].strftime("%d.%m.%Y")} ({when}). Until then this is a warm-up '
-                      f'week - same three sessions, no pressure.</p>')
-
-    # ---- this week's schedule
-    cells = []
-    by_day = {s["weekday"]: s for s in d["sessions"]}
-    extra_by_day = defaultdict(list)
-    for r in d["extra_runs"]:
-        extra_by_day[r["_date"].weekday()].append(r)
-    for i in range(7):
-        day = d["this_monday"] + timedelta(days=i)
-        s = by_day.get(i)
-        extras = extra_by_day.get(i, [])
-        is_today = " today" if day == today else ""
-        if s and s["run"]:
-            run = s["run"]
-            cells.append(f'<div class="day done{is_today}"><span class="dname">{SHORT_DAYS[i]}</span>'
-                         f'<span class="dmark">✓</span>'
-                         f'<span class="dlabel">{run["distance"]/1000:.1f}</span>'
-                         f'<span class="dlabel wide">{run["distance"]/1000:.1f} km</span></div>')
-        elif s:
-            late = " late" if day < today else ""
-            cells.append(f'<div class="day planned{late}{is_today}"><span class="dname">{SHORT_DAYS[i]}</span>'
-                         f'<span class="dmark">○</span>'
-                         f'<span class="dlabel">{s["short"]}</span>'
-                         f'<span class="dlabel wide">{s["long_name"]}</span></div>')
-        elif extras:
-            cells.append(f'<div class="day done{is_today}"><span class="dname">{SHORT_DAYS[i]}</span>'
-                         f'<span class="dmark">✓</span>'
-                         f'<span class="dlabel">{extras[0]["distance"]/1000:.1f}</span>'
-                         f'<span class="dlabel wide">{extras[0]["distance"]/1000:.1f} km</span></div>')
-        else:
-            cells.append(f'<div class="day rest{is_today}"><span class="dname">{SHORT_DAYS[i]}</span>'
-                         f'<span class="dmark">·</span><span class="dlabel">Rest</span>'
-                         f'<span class="dlabel wide">Rest</span></div>')
-    done = sum(1 for s in d["sessions"] if s["run"])
-    extra_note = f' · {len(d["extra_runs"])} extra run{"s" if len(d["extra_runs"]) != 1 else ""}' if d["extra_runs"] else ""
-    week_body = (f'<p class="sub tight">{d["week_label"]} · {done} of 3 sessions done{extra_note}</p>'
-                 f'<div class="week">{"".join(cells)}</div>')
-
     # ---- key numbers
     trend = f'avg {d["avg4"]:.1f} km' if d["avg4"] > 0.5 else 'building up'
     tiles = (f'<div class="tiles">'
@@ -580,34 +551,33 @@ def page_home(d):
     else:
         latest_body = f'<p class="note-coach">{coach_note(None, max_hr)}</p>'
 
-    return (card(next_body, cls="hero")
-            + card(week_body, head="This week", link=("plan", "Plan"))
+    return ('<section class="card nx" id="homenext"></section>'
+            + card('<p class="sub tight" id="homeweeksub"></p><div class="week" id="homeweek"></div>',
+                   head="This week", link=("plan", "Plan"))
             + tiles
             + card(latest_body, head="Latest run", link=("runs", "All runs")))
 
 
 def page_plan(d):
+    """The calendar is drawn in the browser (web/plan.js) so sessions can be moved
+    and edited on the spot; the progression and zones are fixed reference."""
     max_hr = d["max_hr"]
-    rows = []
-    for s in d["sessions"]:
-        done = s["run"] is not None
-        mark = '<span class="ok">✓</span>' if done else '<span class="todo">○</span>'
-        extra = ""
-        if done:
-            r = s["run"]
-            extra = (f'<p class="did">Done: {escape(r["name"])} · {r["distance"]/1000:.1f} km · '
-                     f'{fmt_time(r["moving_time"])} · {fmt_pace(r["moving_time"], r["distance"])} /km · '
-                     f'{hr_text(r)} bpm {dot(r["_zone"])}</p>')
-        rows.append(f'<div class="session">{mark}<div>'
-                    f'<span class="when">{WEEKDAYS[s["weekday"]]} {s["date"].strftime("%d.%m")}</span>'
-                    f'<b>{s["title"]}</b><p>{s["detail"]}</p>{extra}</div></div>')
-    span = f'{d["this_monday"].strftime("%d.%m")}–{(d["this_monday"] + timedelta(days=6)).strftime("%d.%m.%Y")}'
-    title = ("Warm-up week before the plan starts" if d["before_start"]
-             else f'Week {d["week_no"]} of the plan')
-    week_body = (f'<p class="sub tight">{title} · {span}</p>'
-                 f'<div class="plan">{"".join(rows)}</div>'
-                 f'<p class="hint">Keep at least one day between runs. If a day does not work, move it - '
-                 f'three sessions in the week matters more than which days they land on.</p>')
+    calendar = (
+        '<div class="cal-head">'
+        '<button type="button" class="calnav" data-cal="prev" aria-label="Earlier">‹</button>'
+        '<div class="cal-title"><b id="caltitle"></b><span id="calsub"></span></div>'
+        '<button type="button" class="calnav" data-cal="next" aria-label="Later">›</button>'
+        '</div>'
+        '<div class="cal-tools">'
+        '<div class="choices" id="calview" role="group" aria-label="Calendar view">'
+        '<button type="button" data-view="week">Week</button><button type="button" data-view="month">Month</button></div>'
+        '<button type="button" class="btn small ghost" data-cal="today">Today</button>'
+        '</div>'
+        '<div id="calbody" class="cal-body"></div>'
+        '<p class="hint" id="calhint">Hold a session and drag it to another day. Tap it to change, move or remove it, '
+        'and + to add one.</p>'
+        '<div class="plan-foot"><span class="hint" id="planstatus"></span>'
+        '<button type="button" class="more" id="planreset" hidden>Back to the standard plan</button></div>')
 
     step_now, _ = threshold_step(d["week_no"])
     steps = "".join(
@@ -621,17 +591,6 @@ def page_plan(d):
                  f'moving on if the last one felt hard or the heart rate crept above '
                  f'{bpm(max_hr, 88) - 1} bpm.</p>')
 
-    ahead = []
-    for n in range(1, 6):
-        monday = d["this_monday"] + timedelta(weeks=n)
-        wk = week_number_for(monday, d["plan_start"])
-        _, (reps, _) = threshold_step(wk)
-        ahead.append(f'<div class="zrow"><span>Week {wk} · from {monday.strftime("%d.%m")}</span>'
-                     f'<span class="num">{reps}</span></div>')
-    ahead_body = (f'<div class="zlist">{"".join(ahead)}</div>'
-                  f'<p class="hint">Editing the plan in the app (and writing your own sessions) is the next '
-                  f'thing on the list. For now the plan follows the progression above automatically.</p>')
-
     zone_rows = "".join(
         f'<tr><td class="wrap">{dot(k)}<b>{label}</b><div class="desc">{why}</div></td>'
         f'<td class="num">{zone_range(max_hr, lo, hi)}</td></tr>' for k, label, lo, hi, why in ZONES)
@@ -639,9 +598,8 @@ def page_plan(d):
                   f'{zone_rows}</table></div>'
                   f'<p class="hint">Based on a max heart rate of {max_hr} bpm.</p>')
 
-    return (card(week_body, head="This week")
+    return (card(calendar, cls="calcard")
             + card(prog_body, head="Threshold progression")
-            + card(ahead_body, head="Weeks ahead")
             + card(zones_body, head="Your heart rate zones"))
 
 
@@ -777,7 +735,7 @@ def page_settings(d):
         '<button type="button" data-route="glow">Glow</button>'
         '<button type="button" data-route="hr">Heart rate</button>'
         '<button type="button" data-route="pace">Pace</button>'
-        '<button type="button" data-route="elev">Height</button></div>'
+        '<button type="button" data-route="elev">Elevation</button></div>'
         '<p class="hint">What a map opens with. You can switch on the map itself, and the 3D button '
         'tilts it over the real terrain.</p>')
 
@@ -1081,7 +1039,7 @@ def prepare(activities, config, details=None):
     }
 
 
-def render(activities, config, details=None, notes=None):
+def render(activities, config, details=None, notes=None, plan=None):
     d = prepare(activities, config, details)
     heads = {
         "home": ("Training", f'{d["week_label"]} · updated {d["updated"]}'),
@@ -1108,7 +1066,8 @@ def render(activities, config, details=None, notes=None):
     # "</" is escaped so a run named "</script>" cannot break out of the tag
     blob = lambda obj: json.dumps(obj, separators=(",", ":")).replace("</", "<\\/")
     data = (f'<script>window.CONF={blob(conf)};window.RUNS={blob(runs_payload(d))};'
-            f'window.NOTES={blob(notes or {})};</script>')
+            f'window.NOTES={blob(notes or {})};'
+            f'window.PLAN={blob({"standard": standard_plan(config, d["max_hr"], d["today"]), "saved": plan})};</script>')
     nav = "".join(f'<a href="#/{key}">{icon(key)}<span>{label}</span></a>' for key, label in PAGES)
 
     return f"""<!doctype html>
