@@ -83,6 +83,16 @@ def zone_of(run, max_hr):
     return zone_for_pct(hr / max_hr * 100) if hr else "nohr"
 
 
+def run_kind(run):
+    """What sort of session a run was: 'threshold', 'long' or 'easy'.
+    Judged by time actually spent at threshold or above, not by the average -
+    an interval session's average includes the warm-up and the jogs."""
+    zs = run.get("_zone_seconds") or {}
+    if zs.get("threshold", 0) + zs.get("hard", 0) >= 8 * 60:
+        return "threshold"
+    return "long" if run.get("moving_time", 0) >= 55 * 60 else "easy"
+
+
 def zones_from_histogram(hist, max_hr):
     """Seconds per zone from the cached bpm histogram - the honest version of
     zone_of(), because a threshold session is not one single zone."""
@@ -576,7 +586,7 @@ def runs_payload(d):
             "hr": round(r["average_heartrate"]) if r.get("average_heartrate") else None,
             "mhr": round(r["max_heartrate"]) if r.get("max_heartrate") else None,
             "cad": round(r["average_cadence"] * 2) if r.get("average_cadence") else None,
-            "z": r["_zone"],
+            "z": r["_zone"], "k": r["_kind"],
             "poly": (r.get("map") or {}).get("summary_polyline") or "",
             "zs": {k: round(v) for k, v in r["_zone_seconds"].items() if v},
         }
@@ -590,18 +600,39 @@ def runs_payload(d):
 
 
 def page_map(d):
-    """
-    Placeholder. The plan is a full-screen map holding every run at once plus a
-    heat map of the ground he covers most, reusing SlippyMap and the route
-    styles from the run page - so it waits until those are settled.
-    """
+    """A full-screen map of every run; web/mappage.js draws it when the tab opens."""
+    chip = lambda attr, val, label: f'<button type="button" data-{attr}="{val}">{label}</button>'
+    basemaps = "".join(
+        f'<button type="button" role="menuitemradio" data-basemap="{k}"><span><b>{n}</b><small>{h}</small></span></button>'
+        for k, n, h in (("map", "Map", "Clean and quiet, follows light or dark"),
+                        ("outdoor", "Outdoor", "Trails, forest and paths"),
+                        ("satellite", "Satellite", "Aerial photos")))
     return (
-        '<section class="card"><h2>Not built yet</h2>'
-        '<p class="sub">This is where every run will sit on one map, with a heat map of '
-        'the roads and trails you run most often. It will use the same map and route '
-        'styles as a single run, so it is waiting until those are exactly right.</p>'
-        '<p class="sub">For now, open any run from '
-        '<a href="#/runs">Runs</a> to see its route.</p></section>')
+        '<div class="mp" id="mappage">'
+        '<div class="mp-map"></div>'
+        '<div class="mp-top">'
+        '<div class="choices mp-mode" role="group" aria-label="What to show">'
+        + chip("mode", "heat", "Heat map") + chip("mode", "routes", "Routes") +
+        '</div>'
+        '<div class="mp-chips" role="group" aria-label="Which runs">'
+        + "".join(chip("period", k, n) for k, n in (("28", "4 weeks"), ("91", "3 months"), ("all", "All"))) +
+        '<span class="mp-sep" aria-hidden="true"></span>'
+        + "".join(chip("kind", k, n) for k, n in (("all", "All runs"), ("easy", "Easy"),
+                                                  ("long", "Long"), ("threshold", "Threshold"))) +
+        '</div><p class="mp-stats"></p></div>'
+        '<div class="mv-side mp-side">'
+        '<button type="button" class="mbtn txt" data-act="3d" aria-pressed="false" aria-label="3D terrain">3D</button>'
+        '<button type="button" class="mbtn" data-act="basemap" aria-label="Background map" aria-haspopup="menu">'
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" '
+        'stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></svg></button>'
+        '<button type="button" class="mbtn" data-act="fit" aria-label="Show all runs">'
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" '
+        'stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>'
+        '</div>'
+        f'<div class="mpop" data-menu="basemap" hidden role="menu">{basemaps}</div>'
+        '<div class="mlegend" hidden></div>'
+        '<div class="mp-card" hidden></div>'
+        '</div>')
 
 
 def page_settings(d):
@@ -751,6 +782,7 @@ def prepare(activities, config, details=None):
         hist = (r["_detail"] or {}).get("hrhist")
         r["_zone_seconds"] = (zones_from_histogram(hist, max_hr) if hist
                               else {r["_zone"]: r["moving_time"]})
+        r["_kind"] = run_kind(r)
     runs.sort(key=lambda r: r["_date"], reverse=True)
 
     today = date.fromisoformat(config["today"]) if config.get("today") else date.today()
@@ -828,7 +860,7 @@ def render(activities, config, details=None, notes=None):
         "home": ("Training", f'{d["week_label"]} · updated {d["updated"]}'),
         "plan": ("Plan", "3 runs a week: one threshold session, two easy · Norwegian method"),
         "runs": ("Runs", "Your runs from Strava, last 140 days"),
-        "map": ("Map", "Every route on one map"),
+        "map": ("Map", "Every run on one map"),
         "progress": ("Progress", f'Max heart rate {d["max_hr"]} bpm · updated {d["updated"]}'),
         "settings": ("Settings", "Appearance is per device; training settings sync to your other devices"),
     }

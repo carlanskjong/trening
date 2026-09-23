@@ -121,6 +121,22 @@
     }
   }
 
+  // The map credits stay folded into their (i) button - MapLibre unfolds them
+  // whenever the sources change - unless you open them yourself.
+  function keepCreditsFolded(map, el) {
+    var opened = false;
+    var fold = function () {
+      var a = el.querySelector('.maplibregl-ctrl-attrib');
+      if (a && !opened) a.classList.remove('maplibregl-compact-show');
+    };
+    el.addEventListener('click', function (e) {
+      if (e.target.closest('.maplibregl-ctrl-attrib-button')) opened = !opened;
+    });
+    map.on('style.load', fold);
+    map.on('sourcedata', fold);
+    map.on('terrain', fold);
+  }
+
   /* ---------------- the route as geometry ---------------- */
   function decodePoly(str) {
     var pts = [], i = 0, lat = 0, lng = 0, b, shift, result;
@@ -398,19 +414,8 @@
         // Frame the route once, here rather than on 'load': 'load' waits for every
         // tile, which on a poor connection can be a long time or never.
         if (!self.placed) { self.placed = true; self.fit(false); }
-        foldCredits();
       });
-      // The map credits stay folded into their (i) button - MapLibre unfolds them
-      // on every new basemap - unless you open them yourself.
-      var openedCredits = false;
-      var foldCredits = function () {
-        var a = el.querySelector('.maplibregl-ctrl-attrib');
-        if (a && !openedCredits) a.classList.remove('maplibregl-compact-show');
-      };
-      el.addEventListener('click', function (e) {
-        if (e.target.closest('.maplibregl-ctrl-attrib-button')) openedCredits = !openedCredits;
-      });
-      map.on('sourcedata', function (e) { if (e.isSourceLoaded) foldCredits(); });
+      keepCreditsFolded(map, el);
       map.on('click', function (e) {
         if (!self.onPick) return;
         var near = map.queryRenderedFeatures(e.point, { layers: ['route-hit'] });
