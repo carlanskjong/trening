@@ -75,7 +75,7 @@ def simulate(kind, minutes, reps=None):
     else:
         blocks = [("run", seconds, 2.82, 142)]
 
-    time_s, dist, hr, speed, alt = [], [], [], [], []
+    time_s, dist, hr, speed, alt, cad = [], [], [], [], [], []
     laps, t, metres, beat, lap_start = [], 0, 0.0, 95.0, 0
     for name, length, target_speed, target_hr in blocks:
         for i in range(int(length)):
@@ -88,6 +88,8 @@ def simulate(kind, minutes, reps=None):
             speed.append(round(v, 2))
             hr.append(round(beat))
             alt.append(round(18 + 22 * math.sin(t / 500) + 6 * math.sin(t / 97), 1))
+            # Strava's cadence is one foot's steps per minute; quicker running, quicker feet
+            cad.append(round(78 + (v - 2.6) * 6 + random.gauss(0, 1.2)))
             t += 1
         if kind == "threshold":                                   # one lap per block
             laps.append({"lap_index": len(laps) + 1, "distance": metres - dist[lap_start],
@@ -109,7 +111,7 @@ def simulate(kind, minutes, reps=None):
                 km, start = km + 1, i
     streams = {k: {"data": v} for k, v in
                (("time", time_s), ("distance", dist), ("heartrate", hr),
-                ("velocity_smooth", speed), ("altitude", alt))}
+                ("velocity_smooth", speed), ("altitude", alt), ("cadence", cad))}
     return streams, laps
 
 
@@ -141,7 +143,7 @@ while day <= TODAY:
         "average_heartrate": round(sum(beats) / len(beats), 1), "max_heartrate": float(max(beats)),
         "average_speed": round(distance / moving, 3),
         "max_speed": round(max(streams["velocity_smooth"]["data"]), 3),
-        "average_cadence": round(random.uniform(78, 86), 1),
+        "average_cadence": round(sum(streams["cadence"]["data"]) / moving, 1),
         "kudos_count": random.randint(0, 6),
         "map": {"id": f"a{rid}", "summary_polyline": encode_polyline(route(distance, rid))},
     })

@@ -9,6 +9,9 @@ The workflow commits those files, so later builds cost no API calls at all.
 
 What is stored per run (heavily trimmed - the raw streams are far too big):
   t/d/hr/sp/alt  ~160 evenly spaced samples: seconds, metres, bpm, cm/s, metres
+  cad            the same samples of cadence, in steps per minute (both feet)
+  cadv           1 once cadence has been asked for - runs cached before cadence was
+                 added lack it and are topped up a few at a time (one call each)
   hrhist         seconds spent at each bpm (60-220), so heart-rate zones can be
                  recalculated later if max_hr ever changes
   splits         one entry per kilometre: seconds, average bpm, elevation gain
@@ -30,7 +33,7 @@ CACHE = ROOT / "cache"
 SAMPLES = 160           # points kept per stream
 VERSION = 2             # bump to re-fetch everything with a new shape
 HR_MIN, HR_MAX = 60, 220
-KEYS = "time,distance,heartrate,velocity_smooth,altitude"
+KEYS = "time,distance,heartrate,velocity_smooth,altitude,cadence"
 
 
 # ---------- encrypted cache files ----------
@@ -163,12 +166,14 @@ def _shape(streams, laps):
     s = streams or {}
     grab = lambda k: (s.get(k) or {}).get("data") or []
     time_s, dist, hr = grab("time"), grab("distance"), grab("heartrate")
-    speed, alt = grab("velocity_smooth"), grab("altitude")
+    speed, alt, cad = grab("velocity_smooth"), grab("altitude"), grab("cadence")
     return {
-        "v": VERSION,
+        "v": VERSION, "cadv": 1,
         "t": _resample(time_s), "d": _resample(dist), "hr": _resample(hr),
         "sp": _resample([v * 100 for v in speed]) if speed else [],
         "alt": _resample(alt),
+        # Strava counts running cadence for one foot; everyone else means both
+        "cad": _resample([None if c is None else c * 2 for c in cad]) if cad else [],
         "hrhist": _histogram(time_s, hr),
         "splits": _splits(time_s, dist, hr, alt),
         "laps": _laps(laps),
@@ -177,33 +182,46 @@ def _shape(streams, laps):
 
 # ---------- what build_site.py calls ----------
 
-def collect(runs, token, secret, budget=40):
+def _add_cadence(cached, streams):
+    """Top up a run cached before cadence was stored, keeping everything else."""
+    fresh = _shape(streams, None)
+    cached["cad"] = fresh["cad"] if len(fresh["cad"]) == len(cached.get("t") or []) else []
+    cached["cadv"] = 1
+    return cached
+
+
+def collect(runs, token, secret, budget=80):
     """
     Detail for every run we can serve: from the cache first, then Strava for what is
-    missing, newest run first and never more than `budget` runs in one build (two API
-    calls each). Whatever is missing this time is picked up by the next hourly build.
+    missing, newest run first. `budget` is API calls per build: a new run costs two
+    (streams and laps), topping up an old run with cadence costs one. Whatever does
+    not fit is picked up by the next hourly build.
     """
-    details, fetched = {}, 0
+    details, calls, fetched, topped = {}, 0, 0, 0
+    upgrades = []
     for run in runs:
         rid = run["id"]
         cached = read_cached(rid, secret)
         if cached:
             details[rid] = cached
+            if not cached.get("cadv"):
+                upgrades.append(rid)
             continue
-        if not token or fetched >= budget:
+        if not token or calls + 2 > budget:
             continue
         try:
             streams, left = _get(
                 f"https://www.strava.com/api/v3/activities/{rid}/streams"
                 f"?keys={urllib.parse.quote(KEYS)}&key_by_type=true", token)
             laps, _ = _get(f"https://www.strava.com/api/v3/activities/{rid}/laps", token)
+            calls += 2
         except RateLimit:
             print("::notice::Strava rate limit hit - the rest of the runs come next build.")
-            break
+            return _report(runs, details, fetched, topped)
         except Denied as e:
             print(f"::warning::{e}. Does the Strava login still have 'activity:read'? "
                   f"Run detail is skipped this build.")
-            break
+            return _report(runs, details, fetched, topped)
         except Exception as e:                       # never let detail break the build
             print(f"::warning::Could not read detail for activity {rid}: {e}")
             continue
@@ -213,7 +231,32 @@ def collect(runs, token, secret, budget=40):
         details[rid] = shaped
         if left is not None and left < 15:
             print("::notice::Close to the Strava rate limit - pausing until the next build.")
+            return _report(runs, details, fetched, topped)
+
+    # then give older runs their cadence, one call each, newest first
+    for rid in upgrades:
+        if not token or calls + 1 > budget:
             break
+        try:
+            streams, left = _get(
+                f"https://www.strava.com/api/v3/activities/{rid}/streams"
+                f"?keys={urllib.parse.quote(KEYS)}&key_by_type=true", token)
+            calls += 1
+        except (RateLimit, Denied):
+            break
+        except Exception as e:
+            print(f"::warning::Could not add cadence to activity {rid}: {e}")
+            continue
+        details[rid] = _add_cadence(details[rid], streams)
+        write_cached(rid, secret, details[rid])
+        topped += 1
+        if left is not None and left < 15:
+            break
+    return _report(runs, details, fetched, topped)
+
+
+def _report(runs, details, fetched, topped):
     waiting = len(runs) - len(details)
-    print(f"Run detail: {len(details)} available ({fetched} newly fetched, {waiting} waiting).")
+    extra = f", {topped} topped up with cadence" if topped else ""
+    print(f"Run detail: {len(details)} available ({fetched} newly fetched{extra}, {waiting} waiting).")
     return details

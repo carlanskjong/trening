@@ -1,24 +1,40 @@
 """
 Turns a list of Strava activities into the dashboard.
 
-The dashboard is one HTML page with four sub-pages - Home, Plan, Runs, Progress -
-and a menu (bottom tab bar on a phone, sidebar on a desktop). Everything is
-rendered here and shipped in one encrypted file, so switching pages is instant
+The dashboard is one HTML page with six sub-pages - Home, Plan, Runs, Map,
+Progress, Settings - and a menu (bottom tab bar on a phone, sidebar on a
+desktop). It is shipped as one encrypted file, so switching pages is instant
 and works offline once opened.
 
+This file builds what is fixed at build time: the numbers, the Python-drawn
+SVG charts and the page skeletons. Everything interactive - the run page,
+maps, the plan calendar, settings - is browser code in web/*.js, which this
+file inlines in the order of APP_FILES.
+
 Layout of this file:
-  1. Settings and small helpers
-  2. The training plan (week structure, progression, matching runs to sessions)
+  1. Settings and small helpers (zones, effort, efficiency, decoupling)
+  2. The training plan (the standard plan, as data the Plan page edits)
   3. Charts (hand-built inline SVG)
-  4. The four pages
-  5. Shell: CSS, menu, router
+  4. The pages
+  5. Shell: menu, and the assembly of CSS and scripts
 """
 import json
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta, date
 from html import escape
+from pathlib import Path
 
 import strava_cache
+import training_plan
+
+WEB = Path(__file__).resolve().parent / "web"
+
+
+def _web(name):
+    """The browser code lives in web/ as real .js/.css files; the page inlines it."""
+    return (WEB / name).read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------- 1. settings
 
@@ -37,16 +53,6 @@ NAMES = {z[0]: z[1] for z in ZONES} | {"nohr": "No heart rate"}
 COLORS = {"easy": 1, "moderate": 2, "threshold": 3, "hard": 4, "nohr": 0}
 ORDER = ["easy", "moderate", "threshold", "hard", "nohr"]
 
-# The threshold session gets longer every 2 weeks.
-PROGRESSION = [
-    ("6 × 3 min", "1 min easy jog"),
-    ("5 × 5 min", "1 min easy jog"),
-    ("4 × 7 min", "1 min easy jog"),
-    ("3 × 10 min", "1½ min easy jog"),
-]
-
-# Which weekday each session lands on (Monday = 0). Override in config.json.
-DEFAULT_PLAN_DAYS = {"threshold": 1, "easy": 3, "long": 6}
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 SHORT_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
@@ -72,6 +78,74 @@ def zone_of(run, max_hr):
     """The zone a whole run lands in, from its average heart rate."""
     hr = run.get("average_heartrate")
     return zone_for_pct(hr / max_hr * 100) if hr else "nohr"
+
+
+def run_kind(run):
+    """What sort of session a run was: 'threshold', 'long' or 'easy'.
+    Judged by time actually spent at threshold or above, not by the average -
+    an interval session's average includes the warm-up and the jogs."""
+    zs = run.get("_zone_seconds") or {}
+    if zs.get("threshold", 0) + zs.get("hard", 0) >= 8 * 60:
+        return "threshold"
+    return "long" if run.get("moving_time", 0) >= 55 * 60 else "easy"
+
+
+# Edwards' heart-rate load: each minute counts 1-5 by how hard it was.
+EFFORT_BANDS = [(50, 60, 1), (60, 70, 2), (70, 80, 3), (80, 90, 4), (90, 101, 5)]
+
+
+def effort_of(run, max_hr):
+    """Heart-rate load for one run (Edwards' TRIMP). Exact from the cached
+    seconds-per-bpm histogram; from the average heart rate when there is none."""
+    hist = (run.get("_detail") or {}).get("hrhist")
+    score = 0.0
+    if hist:
+        for i, secs in enumerate(hist):
+            pct = (strava_cache.HR_MIN + i) / max_hr * 100
+            for lo, hi, w in EFFORT_BANDS:
+                if lo <= pct < hi:
+                    score += secs / 60 * w
+        return round(score)
+    hr = run.get("average_heartrate")
+    if not hr:
+        return None
+    pct = hr / max_hr * 100
+    w = next((w for lo, hi, w in EFFORT_BANDS if lo <= pct < hi), 0)
+    return round(run["moving_time"] / 60 * w)
+
+
+def rep_pace(run, max_hr):
+    """(seconds per km, average bpm) over the laps run at threshold or above -
+    the reps of an interval session without the warm-up and the jogs."""
+    laps = (run.get("_detail") or {}).get("laps") or []
+    reps = [l for l in laps if l.get("hr") and l["hr"] >= max_hr * 0.82 and l.get("m", 0) >= 300]
+    if len(reps) < 2:
+        return None
+    m, secs = sum(l["m"] for l in reps), sum(l["s"] for l in reps)
+    return secs / (m / 1000), sum(l["hr"] * l["s"] for l in reps) / secs
+
+
+def decoupling(run):
+    """Aerobic decoupling (Pa:HR): how much less distance each heartbeat buys in
+    the second half than the first, in %. Under 5% means the heart rate held
+    steady for the pace - good aerobic endurance. The first 10 minutes are left
+    out, while heart rate is still climbing."""
+    det = run.get("_detail") or {}
+    t, d, hr = det.get("t") or [], det.get("d") or [], det.get("hr") or []
+    if len(t) < 40 or len(hr) != len(t) or len(d) != len(t) or t[-1] < 45 * 60:
+        return None
+    idx = [i for i in range(len(t)) if t[i] >= 600 and hr[i] and d[i] is not None]
+    if len(idx) < 20:
+        return None
+    half = t[idx[0]] + (t[idx[-1]] - t[idx[0]]) / 2
+    def ef(part):
+        if len(part) < 5:
+            return None
+        dist, secs = d[part[-1]] - d[part[0]], t[part[-1]] - t[part[0]]
+        beats = sum(hr[i] for i in part) / len(part)
+        return dist / secs / beats if secs and beats else None
+    a, b = ef([i for i in idx if t[i] <= half]), ef([i for i in idx if t[i] > half])
+    return round((a - b) / a * 100, 1) if a and b else None
 
 
 def zones_from_histogram(hist, max_hr):
@@ -144,87 +218,48 @@ def card(body, cls="", head=None, link=None):
 
 # ------------------------------------------------------------------- 2. plan
 
-def week_number_for(monday, plan_start):
-    """Plan week 1 is the week of plan_start; anything before it counts as week 1."""
-    return max((monday - plan_start).days // 7 + 1, 1)
+DAY_INDEX = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
 
-def plan_week_number(config, today):
-    """(week number, the Monday the plan starts, True if the plan has not started yet)."""
-    start = date.fromisoformat(config.get("plan_start", today.isoformat()))
-    start -= timedelta(days=start.weekday())
-    monday = today - timedelta(days=today.weekday())
-    return week_number_for(monday, start), start, monday < start
+# "10 min oppvarming + 5×6 min, p: 90 sek + 5 min nedjogg" -> the set in the
+# title, warm-up and cool-down in the notes, so a week reads at a glance.
+WRAPPED = re.compile(r"^(\d+(?:–\d+)? min (?:oppvarming|svært lett jogg)) \+ (.+) \+ "
+                     r"(\d+(?:–\d+)? min (?:nedjogg|svært lett jogg|rolig jogg))$")
 
 
-def threshold_step(week_no):
-    """The threshold session for a plan week, plus which step of the progression it is."""
-    step = min((week_no - 1) // 2, len(PROGRESSION) - 1)
-    return step, PROGRESSION[step]
+def split_title(title, detail):
+    m = WRAPPED.match(title)
+    if not m:
+        return title, detail
+    warm, core, cool = m.groups()
+    frame = f"{warm[0].upper()}{warm[1:]} før, {cool} etter."
+    return core[0].upper() + core[1:], f"{frame}\n{detail}" if detail else frame
 
 
-def week_sessions(week_no, monday, max_hr, config):
-    """The three planned sessions of a week, as dicts, ordered by day."""
-    days = {**DEFAULT_PLAN_DAYS, **config.get("plan_days", {})}
-    _, (session, rest) = threshold_step(week_no)
-    thr_lo, thr_hi = bpm(max_hr, 82), bpm(max_hr, 88) - 1
-    easy_max = bpm(max_hr, 75)
-    plan = [
-        {"key": "threshold", "zone": "threshold", "title": f"Threshold session: {session}",
-         "short": "Thr", "long_name": "Threshold", "reps": session, "target": f"{thr_lo}–{thr_hi} bpm",
-         "detail": f"15 min easy warm-up, then {session} at <b>{thr_lo}–{thr_hi} bpm</b> with {rest} "
-                   f"between, then 10 min easy. Stay in the lower half of that range - it should feel "
-                   f"comfortably hard, like you could do one more rep. Heart rate rises slowly, so "
-                   f"don't chase the number in the first minute."},
-        {"key": "easy", "zone": "easy", "title": "Easy run: 40–50 min",
-         "short": "Easy", "long_name": "Easy run", "reps": "40–50 min", "target": f"under {easy_max} bpm",
-         "detail": f"Heart rate <b>under {easy_max} bpm</b> the whole way. Slow down or walk the hills "
-                   f"if you need to. This should feel almost too easy."},
-        {"key": "long", "zone": "easy", "title": "Long easy run: 60–75 min",
-         "short": "Long", "long_name": "Long run", "reps": "60–75 min", "target": f"under {easy_max} bpm",
-         "detail": f"Same rule: <b>under {easy_max} bpm</b>. This builds the engine that makes the "
-                   f"threshold work pay off. Time on your feet matters more than pace."},
-    ]
-    for s in plan:
-        s["weekday"] = days.get(s["key"], DEFAULT_PLAN_DAYS[s["key"]])
-        s["date"] = monday + timedelta(days=s["weekday"])
-        s["run"] = None
-    return sorted(plan, key=lambda s: s["weekday"])
-
-
-def match_runs_to_sessions(sessions, runs):
-    """Tie the week's actual runs to the planned sessions. Returns the leftovers."""
-    left = sorted(runs, key=lambda r: r["_date"])
-    for s in sessions:                                   # 1. same weekday wins
-        for r in left:
-            if r["_date"].weekday() == s["weekday"]:
-                s["run"], left = r, [x for x in left if x is not r]
-                break
-    for s in sessions:                                   # 2. a quality run fills the threshold slot
-        if s["key"] == "threshold" and not s["run"]:
-            for r in left:
-                if r["_zone"] in ("threshold", "hard"):
-                    s["run"], left = r, [x for x in left if x is not r]
-                    break
-    for s in sorted(sessions, key=lambda s: s["key"] != "long"):   # 3. longest leftover -> long run
-        if not s["run"] and left:
-            pick = max(left, key=lambda r: r["moving_time"]) if s["key"] == "long" else left[0]
-            s["run"], left = pick, [x for x in left if x is not pick]
-    return left
-
-
-def next_session(sessions, today):
-    """The session to point at on the front page: today's, then the next one, then anything missed."""
-    for s in sessions:
-        if not s["run"] and s["date"] == today:
-            return s, "today"
-    for s in sessions:
-        if not s["run"] and s["date"] > today:
-            return s, "upcoming"
-    for s in sessions:
-        if not s["run"] and s["date"] < today:
-            return s, "missed"
-    return None, "done"
+def standard_plan(today, days_back=140):
+    """
+    His training plan (training_plan.py) as the list of sessions the Plan page
+    edits. Only from `days_back` days ago: older sessions have no runs in the
+    data to tick them off, and would look missed when they were not.
+    Ids are stable ('2026-W40-2'), so an edited plan can tell sessions apart.
+    """
+    first = today - timedelta(days=days_back)
+    out, last = [], None
+    for week, sessions in sorted(training_plan.WEEKS.items()):
+        monday = date.fromisocalendar(training_plan.YEAR, week, 1)
+        for n, (day, kind, title, detail, optional) in enumerate(sessions, 1):
+            when = monday + timedelta(days=DAY_INDEX[day])
+            last = monday + timedelta(days=6)
+            if when < first:
+                continue
+            title, detail = split_title(title, detail)
+            item = {"id": f"{training_plan.YEAR}-W{week:02d}-{n}", "date": when.isoformat(), "type": kind,
+                    "title": title, "detail": detail}
+            if optional:
+                item["opt"] = True
+            out.append(item)
+    return {"sessions": out, "until": last.isoformat() if last else today.isoformat(),
+            "version": training_plan.VERSION}
 
 
 def coach_note(run, max_hr):
@@ -254,46 +289,133 @@ def coach_note(run, max_hr):
 
 # ----------------------------------------------------------------- 3. charts
 
-def weekly_chart(weeks, week_km):
-    """Stacked bars: one per week, split by the zone each run fell in."""
-    W, H, left, bottom, top = 760, 260, 44, 30, 12
+def dot_mark(cx, cy, cls="pt"):
+    """A data dot that stays the same size on screen however far the chart is
+    scaled: a zero-length line with a round cap and a non-scaling stroke. A
+    circle's radius would shrink with the chart and end up ~2 px on a phone.
+    Includes a surface-coloured ring and a 28 px touch target."""
+    a = f'x1="{cx:.1f}" y1="{cy:.1f}" x2="{cx + 0.01:.2f}" y2="{cy:.1f}"'
+    return f'<line {a} class="hitdot"/><line {a} class="ptring"/><line {a} class="{cls}"/>'
+
+
+def column_chart(weeks, values, label, fmt=lambda v: f"{v:.0f}", tip=None, bands=None, unit=""):
+    """One column per week. The current week is the accent; earlier weeks are
+    quiet context. `bands` = {week: (lo, hi)} draws a usual-range wash behind."""
+    W, H, left, bottom, top = 760, 230, 58, 28, 14
     plot_w, plot_h = W - left - 8, H - bottom - top
-    peak = max([sum(v.values()) for v in week_km.values()] + [10])
-    step = 10 if peak <= 60 else 20
+    peak = max([v for v in values.values() if v] + [hi for lo, hi in (bands or {}).values()] + [1])
+    step = next(s for s in (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000) if peak / s <= 5)
     y_max = (int(peak // step) + 1) * step
     slot = plot_w / len(weeks)
-    bar_w = min(28, slot * 0.6)
-    y = lambda km: top + plot_h - km / y_max * plot_h
+    bar_w = min(24, slot * 0.62)
+    y = lambda v: top + plot_h - v / y_max * plot_h
     svg = []
     for t in range(0, y_max + 1, step):
         svg.append(f'<line x1="{left}" x2="{W-8}" y1="{y(t):.1f}" y2="{y(t):.1f}" class="grid"/>'
-                   f'<text x="{left-6}" y="{y(t)+4:.1f}" class="tick" text-anchor="end">{t}</text>')
+                   f'<text x="{left-6}" y="{y(t)+4:.1f}" class="tick" text-anchor="end">{fmt(t)}</text>')
     for i, w in enumerate(weeks):
-        x = left + i * slot + (slot - bar_w) / 2
-        total = sum(week_km[w].values())
-        segs = [(k, week_km[w][k]) for k in ORDER if week_km[w][k] > 0]
-        tip = f"Week of {w.strftime('%d.%m')}: {total:.1f} km" + "".join(
-            f"|{NAMES[k]}: {v:.1f} km" for k, v in segs)
-        svg.append(f'<g class="wk" data-tip="{escape(tip)}">'
-                   f'<rect x="{left + i*slot:.1f}" y="{top}" width="{slot:.1f}" height="{plot_h}" class="hit"/>')
-        base = 0.0
-        for n, (k, v) in enumerate(segs):
-            y0, y1 = y(base), y(base + v)
-            last = n == len(segs) - 1
-            h = max(y0 - y1 - (0 if last else 2), 1)
-            svg.append(f'<rect x="{x:.1f}" y="{y1:.1f}" width="{bar_w:.1f}" height="{h:.1f}" '
-                       f'rx="{4 if last else 0}" class="s{COLORS[k]}"/>')
-            if last and h > 4:  # square off the bottom corners of the rounded top segment
-                svg.append(f'<rect x="{x:.1f}" y="{y1 + h - 4:.1f}" width="{bar_w:.1f}" height="4" '
-                           f'class="s{COLORS[k]}"/>')
-            base += v
+        x0 = left + i * slot
+        x = x0 + (slot - bar_w) / 2
+        v = values.get(w) or 0
+        band = (bands or {}).get(w)
+        if band:
+            svg.append(f'<rect x="{x0 + 2:.1f}" y="{y(band[1]):.1f}" width="{slot - 4:.1f}" '
+                       f'height="{max(y(band[0]) - y(band[1]), 1):.1f}" class="rangeband"/>')
+        text = tip(w, v) if tip else f"Week of {w.strftime('%d.%m')}|{fmt(v)}{unit}"
+        cls = "col now" if i == len(weeks) - 1 else "col"
+        svg.append(f'<g class="wk" data-tip="{escape(text)}">'
+                   f'<rect x="{x0:.1f}" y="{top}" width="{slot:.1f}" height="{plot_h}" class="hit"/>')
+        if v > 0:
+            h = max(y(0) - y(v), 2)
+            r = min(4, h / 2)
+            # rounded top, square foot: a path, so the corners sit only where the data ends
+            svg.append(f'<path class="{cls}" d="M{x:.1f} {y(0):.1f}V{y(v) + r:.1f}Q{x:.1f} {y(v):.1f} {x + r:.1f} {y(v):.1f}'
+                       f'H{x + bar_w - r:.1f}Q{x + bar_w:.1f} {y(v):.1f} {x + bar_w:.1f} {y(v) + r:.1f}V{y(0):.1f}Z"/>')
         if (len(weeks) - 1 - i) % 3 == 0:
             anchor = "start" if i == 0 else "end" if i == len(weeks) - 1 else "middle"
             svg.append(f'<text x="{x + bar_w/2:.1f}" y="{H-8}" class="tick" text-anchor="{anchor}">'
                        f'{w.strftime("%d.%m")}</text>')
         svg.append("</g>")
     svg.append(f'<line x1="{left}" x2="{W-8}" y1="{y(0):.1f}" y2="{y(0):.1f}" class="axis"/>')
-    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Weekly running distance by intensity">'
+    return f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{escape(label)}">{"".join(svg)}</svg>'
+
+
+def dot_trend(points, label, fmt, invert=False, pad=0.15, guide=None):
+    """Dots over time with a rolling average line through them.
+    points = [(date, value, tooltip)]. `invert` puts small values on top (pace).
+    `guide` = (value, text) draws one labelled reference line."""
+    if len(points) < 3:
+        return '<p class="sub">Not enough runs yet - this fills in after a few weeks.</p>'
+    W, H, left, bottom, top = 760, 240, 66, 30, 16
+    plot_w, plot_h = W - left - 12, H - bottom - top
+    vals = [v for _, v, _ in points] + ([guide[0]] if guide else [])
+    lo, hi = min(vals), max(vals)
+    span = max(hi - lo, abs(hi) * 0.04, 1e-6)
+    lo, hi = lo - span * pad, hi + span * pad
+    d0, d1 = points[0][0], points[-1][0]
+    days = max((d1 - d0).days, 1)
+    x = lambda d: left + 14 + (plot_w - 28) * (d - d0).days / days      # dots clear of the axis labels
+    y = lambda v: (top + (v - lo) / (hi - lo) * plot_h) if invert else (top + plot_h - (v - lo) / (hi - lo) * plot_h)
+    svg = []
+    for t in range(4):
+        v = lo + (hi - lo) * (t + 0.5) / 4
+        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="grid"/>'
+                   f'<text x="{left-6}" y="{y(v)+4:.1f}" class="tick" text-anchor="end">{fmt(v)}</text>')
+    if guide:
+        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(guide[0]):.1f}" y2="{y(guide[0]):.1f}" class="guide"/>'
+                   f'<text x="{W-14}" y="{y(guide[0])-5:.1f}" class="tick" text-anchor="end">{escape(guide[1])}</text>')
+    # rolling mean of the 5 nearest runs, so one odd run does not bend the story
+    roll = []
+    for i in range(len(points)):
+        win = [v for _, v, _ in points[max(0, i - 2):i + 3]]
+        roll.append(sum(win) / len(win))
+    svg.append('<polyline class="line" points="' +
+               " ".join(f"{x(d):.1f},{y(v):.1f}" for (d, _, _), v in zip(points, roll)) + '"/>')
+    for d, v, tip in points:
+        svg.append(f'<g class="wk" data-tip="{escape(tip)}">{dot_mark(x(d), y(v), "pt soft")}</g>')
+    for d in (d0, d0 + (d1 - d0) / 2, d1):
+        anchor = "start" if d == d0 else "end" if d == d1 else "middle"
+        svg.append(f'<text x="{x(d):.1f}" y="{H-8}" class="tick" text-anchor="{anchor}">{d.strftime("%d.%m")}</text>')
+    return f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{escape(label)}">{"".join(svg)}</svg>'
+
+
+def speed_hr_chart(points, max_hr):
+    """Each run as a dot: average heart rate across, average pace up (faster
+    higher). Runs from the last four weeks in the accent, older runs grey.
+    points = [(bpm, sec_per_km, tooltip, recent)]."""
+    if len(points) < 4:
+        return '<p class="sub">Not enough runs with heart rate yet.</p>'
+    W, H, left, bottom, top = 760, 320, 66, 36, 26
+    plot_w, plot_h = W - left - 12, H - bottom - top
+    hrs = [p[0] for p in points]
+    paces = [p[1] for p in points]
+    x0, x1 = min(hrs) - 4, max(hrs) + 4
+    p_lo, p_hi = min(paces), max(paces)
+    pad = max((p_hi - p_lo) * 0.12, 5)
+    p_lo, p_hi = p_lo - pad, p_hi + pad
+    x = lambda v: left + (v - x0) / (x1 - x0) * plot_w
+    y = lambda v: top + (v - p_lo) / (p_hi - p_lo) * plot_h          # faster pace sits higher
+    svg = []
+    # the zone boundaries, so you can see which runs strayed into the grey zone
+    for key, name, lo, hi, _ in ZONES:
+        a, b = max(bpm(max_hr, lo), x0), min(bpm(max_hr, hi), x1)
+        if b <= a:
+            continue
+        svg.append(f'<rect x="{x(a):.1f}" y="{top}" width="{x(b) - x(a):.1f}" height="{plot_h}" class="zband z{key}"/>'
+                   f'<text x="{(x(a) + x(b)) / 2:.1f}" y="{top - 7}" class="tick zname" text-anchor="middle">{name}</text>')
+    for t in range(4):
+        v = p_lo + (p_hi - p_lo) * (t + 0.5) / 4
+        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="grid"/>'
+                   f'<text x="{left-6}" y="{y(v)+4:.1f}" class="tick" text-anchor="end">{int(v//60)}:{int(v%60):02d}</text>')
+    step = 10 if x1 - x0 > 40 else 5
+    for v in range(int(x0 // step + 1) * step, int(x1) + 1, step):
+        svg.append(f'<text x="{x(v):.1f}" y="{H-10}" class="tick" text-anchor="middle">{v}</text>')
+    for recent in (False, True):                                 # recent runs drawn on top
+        for hr, pc, tip, rec in points:
+            if rec != recent:
+                continue
+            svg.append(f'<g class="wk" data-tip="{escape(tip)}">{dot_mark(x(hr), y(pc), "pt" if rec else "pt old")}</g>')
+    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Pace against heart rate, one dot per run">'
             f'{"".join(svg)}</svg>')
 
 
@@ -318,101 +440,10 @@ def zone_bar(zone_seconds):
     return f'<div class="bar">{"".join(rows)}</div><div class="zlist">{legend}</div>'
 
 
-def trend_chart(points, label):
-    """Small line chart. points = [(x-label, value, tooltip)], value in seconds per km."""
-    if len(points) < 2:
-        return '<p class="sub">Not enough runs yet - this fills in after a few weeks.</p>'
-    W, H, left, bottom, top = 760, 200, 66, 30, 14
-    plot_w, plot_h = W - left - 10, H - bottom - top
-    vals = [p[1] for p in points]
-    lo, hi = min(vals), max(vals)
-    pad = max((hi - lo) * 0.25, 8)
-    lo, hi = lo - pad, hi + pad
-    x = lambda i: left + (plot_w * i / (len(points) - 1))
-    y = lambda v: top + plot_h - (v - lo) / (hi - lo) * plot_h
-    svg = []
-    for t in range(4):
-        v = lo + (hi - lo) * t / 3
-        svg.append(f'<line x1="{left}" x2="{W-10}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="grid"/>'
-                   f'<text x="{left-6}" y="{y(v)+4:.1f}" class="tick" text-anchor="end">'
-                   f'{int(v//60)}:{int(v%60):02d}</text>')
-    line = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, (_, v, _) in enumerate(points))
-    svg.append(f'<polyline points="{line}" class="line"/>')
-    for i, (lab, v, tip) in enumerate(points):
-        svg.append(f'<g class="wk" data-tip="{escape(tip)}">'
-                   f'<rect x="{x(i)-14:.1f}" y="{top}" width="28" height="{plot_h}" class="hit"/>'
-                   f'<circle cx="{x(i):.1f}" cy="{y(v):.1f}" r="4" class="pt"/></g>')
-        if i % max(1, len(points) // 6) == 0 or i == len(points) - 1:
-            anchor = "start" if i == 0 else "end" if i == len(points) - 1 else "middle"
-            svg.append(f'<text x="{x(i):.1f}" y="{H-8}" class="tick" text-anchor="{anchor}">{lab}</text>')
-    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{escape(label)}">{"".join(svg)}</svg>')
-
-
 # ------------------------------------------------------------------ 4. pages
 
 def page_home(d):
     max_hr, today = d["max_hr"], d["today"]
-    nxt, state = d["next"], d["next_state"]
-
-    # ---- next session
-    if nxt:
-        when = f'{day_word(nxt["date"], today)} · {nxt["date"].strftime("%d.%m")}'
-        badge = {"today": '<span class="pill hot">Today</span>',
-                 "upcoming": '<span class="pill">Next up</span>',
-                 "missed": '<span class="pill warn">Missed - fit it in</span>'}[state]
-        next_body = (f'<div class="nexthead"><span class="when">{when}</span>{badge}</div>'
-                     f'<h3>{nxt["title"]}</h3>'
-                     f'<p class="target">Target heart rate: <b>{nxt["target"]}</b></p>'
-                     f'<p class="detail">{nxt["detail"]}</p>')
-    else:
-        next_body = ('<div class="nexthead"><span class="when">This week</span>'
-                     '<span class="pill ok-pill">All done ✓</span></div>'
-                     '<h3>Week complete - rest up</h3>'
-                     '<p class="detail">All three sessions are in the bag. Easy days, sleep and food '
-                     'are what turn them into fitness. The next week starts Monday.</p>')
-    if d["before_start"]:
-        days = d["days_to_start"]
-        when = "tomorrow" if days == 1 else f"in {days} days" if days else "today"
-        next_body += (f'<p class="hint">Week 1 of the written plan starts Monday '
-                      f'{d["plan_start"].strftime("%d.%m.%Y")} ({when}). Until then this is a warm-up '
-                      f'week - same three sessions, no pressure.</p>')
-
-    # ---- this week's schedule
-    cells = []
-    by_day = {s["weekday"]: s for s in d["sessions"]}
-    extra_by_day = defaultdict(list)
-    for r in d["extra_runs"]:
-        extra_by_day[r["_date"].weekday()].append(r)
-    for i in range(7):
-        day = d["this_monday"] + timedelta(days=i)
-        s = by_day.get(i)
-        extras = extra_by_day.get(i, [])
-        is_today = " today" if day == today else ""
-        if s and s["run"]:
-            run = s["run"]
-            cells.append(f'<div class="day done{is_today}"><span class="dname">{SHORT_DAYS[i]}</span>'
-                         f'<span class="dmark">✓</span>'
-                         f'<span class="dlabel">{run["distance"]/1000:.1f}</span>'
-                         f'<span class="dlabel wide">{run["distance"]/1000:.1f} km</span></div>')
-        elif s:
-            late = " late" if day < today else ""
-            cells.append(f'<div class="day planned{late}{is_today}"><span class="dname">{SHORT_DAYS[i]}</span>'
-                         f'<span class="dmark">○</span>'
-                         f'<span class="dlabel">{s["short"]}</span>'
-                         f'<span class="dlabel wide">{s["long_name"]}</span></div>')
-        elif extras:
-            cells.append(f'<div class="day done{is_today}"><span class="dname">{SHORT_DAYS[i]}</span>'
-                         f'<span class="dmark">✓</span>'
-                         f'<span class="dlabel">{extras[0]["distance"]/1000:.1f}</span>'
-                         f'<span class="dlabel wide">{extras[0]["distance"]/1000:.1f} km</span></div>')
-        else:
-            cells.append(f'<div class="day rest{is_today}"><span class="dname">{SHORT_DAYS[i]}</span>'
-                         f'<span class="dmark">·</span><span class="dlabel">Rest</span>'
-                         f'<span class="dlabel wide">Rest</span></div>')
-    done = sum(1 for s in d["sessions"] if s["run"])
-    extra_note = f' · {len(d["extra_runs"])} extra run{"s" if len(d["extra_runs"]) != 1 else ""}' if d["extra_runs"] else ""
-    week_body = (f'<p class="sub tight">{d["week_label"]} · {done} of 3 sessions done{extra_note}</p>'
-                 f'<div class="week">{"".join(cells)}</div>')
 
     # ---- key numbers
     trend = f'avg {d["avg4"]:.1f} km' if d["avg4"] > 0.5 else 'building up'
@@ -446,57 +477,40 @@ def page_home(d):
     else:
         latest_body = f'<p class="note-coach">{coach_note(None, max_hr)}</p>'
 
-    return (card(next_body, cls="hero")
-            + card(week_body, head="This week", link=("plan", "Plan"))
+    return ('<section class="card nx" id="homenext"></section>'
+            + card('<p class="sub tight" id="homeweeksub"></p><div class="week" id="homeweek"></div>',
+                   head="This week", link=("plan", "Plan"))
             + tiles
             + card(latest_body, head="Latest run", link=("runs", "All runs")))
 
 
 def page_plan(d):
+    """The calendar is drawn in the browser (web/plan.js) so sessions can be moved
+    and edited on the spot; the progression and zones are fixed reference."""
     max_hr = d["max_hr"]
-    rows = []
-    for s in d["sessions"]:
-        done = s["run"] is not None
-        mark = '<span class="ok">✓</span>' if done else '<span class="todo">○</span>'
-        extra = ""
-        if done:
-            r = s["run"]
-            extra = (f'<p class="did">Done: {escape(r["name"])} · {r["distance"]/1000:.1f} km · '
-                     f'{fmt_time(r["moving_time"])} · {fmt_pace(r["moving_time"], r["distance"])} /km · '
-                     f'{hr_text(r)} bpm {dot(r["_zone"])}</p>')
-        rows.append(f'<div class="session">{mark}<div>'
-                    f'<span class="when">{WEEKDAYS[s["weekday"]]} {s["date"].strftime("%d.%m")}</span>'
-                    f'<b>{s["title"]}</b><p>{s["detail"]}</p>{extra}</div></div>')
-    span = f'{d["this_monday"].strftime("%d.%m")}–{(d["this_monday"] + timedelta(days=6)).strftime("%d.%m.%Y")}'
-    title = ("Warm-up week before the plan starts" if d["before_start"]
-             else f'Week {d["week_no"]} of the plan')
-    week_body = (f'<p class="sub tight">{title} · {span}</p>'
-                 f'<div class="plan">{"".join(rows)}</div>'
-                 f'<p class="hint">Keep at least one day between runs. If a day does not work, move it - '
-                 f'three sessions in the week matters more than which days they land on.</p>')
+    calendar = (
+        '<div class="cal-head">'
+        '<button type="button" class="calnav" data-cal="prev" aria-label="Earlier">‹</button>'
+        '<div class="cal-title"><b id="caltitle"></b><span id="calsub"></span></div>'
+        '<button type="button" class="calnav" data-cal="next" aria-label="Later">›</button>'
+        '</div>'
+        '<div class="cal-tools">'
+        '<div class="choices" id="calview" role="group" aria-label="Calendar view">'
+        '<button type="button" data-view="week">Week</button><button type="button" data-view="month">Month</button></div>'
+        '<button type="button" class="btn small ghost" data-cal="today">Today</button>'
+        '</div>'
+        '<div id="calbody" class="cal-body"></div>'
+        '<p class="hint" id="calhint">Hold a session and drag it to another day. Tap it to change, move or remove it, '
+        'and + to add one.</p>'
+        '<div class="plan-foot"><span class="hint" id="planstatus"></span>'
+        '<button type="button" class="more" id="planreset" hidden>Back to the standard plan</button></div>')
 
-    step_now, _ = threshold_step(d["week_no"])
-    steps = "".join(
-        f'<div class="step{" now" if i == step_now else ""}">'
-        f'<span class="pill">Week {i*2+1}–{i*2+2}</span><b>{reps}</b>'
-        f'<span class="rest">{rest} between</span>'
-        f'{"<span class=nowtag>You are here</span>" if i == step_now else ""}</div>'
-        for i, (reps, rest) in enumerate(PROGRESSION))
-    prog_body = (f'<div class="steps">{steps}</div>'
-                 f'<p class="hint">The threshold session grows every two weeks. Repeat a step instead of '
-                 f'moving on if the last one felt hard or the heart rate crept above '
-                 f'{bpm(max_hr, 88) - 1} bpm.</p>')
-
-    ahead = []
-    for n in range(1, 6):
-        monday = d["this_monday"] + timedelta(weeks=n)
-        wk = week_number_for(monday, d["plan_start"])
-        _, (reps, _) = threshold_step(wk)
-        ahead.append(f'<div class="zrow"><span>Week {wk} · from {monday.strftime("%d.%m")}</span>'
-                     f'<span class="num">{reps}</span></div>')
-    ahead_body = (f'<div class="zlist">{"".join(ahead)}</div>'
-                  f'<p class="hint">Editing the plan in the app (and writing your own sessions) is the next '
-                  f'thing on the list. For now the plan follows the progression above automatically.</p>')
+    guide = "".join(f'<div class="guide-item"><b>{escape(head)}</b><p>{escape(text)}</p></div>'
+                    for head, text in training_plan.GUIDE)
+    guide_body = (f'<div class="guide">{guide}</div>'
+                  f'<p class="hint">Threshold for you is about {bpm(max_hr, 82)}–{bpm(max_hr, 88) - 1} bpm, low '
+                  f'threshold the bottom of that - around {bpm(max_hr, 82) - 1}–{bpm(max_hr, 84)}. Heart rate lags '
+                  f'at the start of a rep, so run the first minute by feel.</p>')
 
     zone_rows = "".join(
         f'<tr><td class="wrap">{dot(k)}<b>{label}</b><div class="desc">{why}</div></td>'
@@ -505,9 +519,8 @@ def page_plan(d):
                   f'{zone_rows}</table></div>'
                   f'<p class="hint">Based on a max heart rate of {max_hr} bpm.</p>')
 
-    return (card(week_body, head="This week")
-            + card(prog_body, head="Threshold progression")
-            + card(ahead_body, head="Weeks ahead")
+    return (card(calendar, cls="calcard")
+            + card(guide_body, head="How this plan works")
             + card(zones_body, head="Your heart rate zones"))
 
 
@@ -523,7 +536,7 @@ def page_runs(d):
             months.append(f'<h3 class="month">{key}</h3>')
         z = r["_zone"]
         months.append(
-            f'<a class="runrow" href="#/run/{r["id"]}">'
+            f'<a class="runrow" href="#/run/{r["id"]}" style="--zc:var(--z-{z})">'
             f'<div class="rmain"><span class="rdate">{SHORT_DAYS[r["_date"].weekday()]} '
             f'{r["_date"].strftime("%d.%m")}</span>'
             f'<span class="rname">{escape(r["name"])}</span>'
@@ -567,32 +580,53 @@ def runs_payload(d):
             "hr": round(r["average_heartrate"]) if r.get("average_heartrate") else None,
             "mhr": round(r["max_heartrate"]) if r.get("max_heartrate") else None,
             "cad": round(r["average_cadence"] * 2) if r.get("average_cadence") else None,
-            "z": r["_zone"],
+            "z": r["_zone"], "k": r["_kind"], "re": r["_effort"],
             "poly": (r.get("map") or {}).get("summary_polyline") or "",
             "zs": {k: round(v) for k, v in r["_zone_seconds"].items() if v},
         }
         if det:
             item |= {"t": det.get("t") or [], "d": det.get("d") or [],
                      "hs": det.get("hr") or [], "sp": det.get("sp") or [],
-                     "al": det.get("alt") or [],
+                     "al": det.get("alt") or [], "cd": det.get("cad") or [],
                      "laps": det.get("laps") or [], "sl": det.get("splits") or []}
         out.append(item)
     return out
 
 
 def page_map(d):
-    """
-    Placeholder. The plan is a full-screen map holding every run at once plus a
-    heat map of the ground he covers most, reusing SlippyMap and the route
-    styles from the run page - so it waits until those are settled.
-    """
+    """A full-screen map of every run; web/mappage.js draws it when the tab opens."""
+    chip = lambda attr, val, label: f'<button type="button" data-{attr}="{val}">{label}</button>'
+    basemaps = "".join(
+        f'<button type="button" role="menuitemradio" data-basemap="{k}"><span><b>{n}</b><small>{h}</small></span></button>'
+        for k, n, h in (("map", "Map", "Clean and quiet, follows light or dark"),
+                        ("outdoor", "Outdoor", "Trails, forest and paths"),
+                        ("satellite", "Satellite", "Aerial photos")))
     return (
-        '<section class="card"><h2>Not built yet</h2>'
-        '<p class="sub">This is where every run will sit on one map, with a heat map of '
-        'the roads and trails you run most often. It will use the same map and route '
-        'styles as a single run, so it is waiting until those are exactly right.</p>'
-        '<p class="sub">For now, open any run from '
-        '<a href="#/runs">Runs</a> to see its route.</p></section>')
+        '<div class="mp" id="mappage">'
+        '<div class="mp-map"></div>'
+        '<div class="mp-top">'
+        '<div class="choices mp-mode" role="group" aria-label="What to show">'
+        + chip("mode", "heat", "Heat map") + chip("mode", "routes", "Routes") +
+        '</div>'
+        '<div class="mp-chips" role="group" aria-label="Which runs">'
+        + "".join(chip("period", k, n) for k, n in (("28", "4 weeks"), ("91", "3 months"), ("all", "All"))) +
+        '<span class="mp-sep" aria-hidden="true"></span>'
+        + "".join(chip("kind", k, n) for k, n in (("all", "All runs"), ("easy", "Easy"),
+                                                  ("long", "Long"), ("threshold", "Threshold"))) +
+        '</div><p class="mp-stats"></p></div>'
+        '<div class="mv-side mp-side">'
+        '<button type="button" class="mbtn txt" data-act="3d" aria-pressed="false" aria-label="3D terrain">3D</button>'
+        '<button type="button" class="mbtn" data-act="basemap" aria-label="Background map" aria-haspopup="menu">'
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" '
+        'stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></svg></button>'
+        '<button type="button" class="mbtn" data-act="fit" aria-label="Show all runs">'
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" '
+        'stroke-linejoin="round" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>'
+        '</div>'
+        f'<div class="mpop" data-menu="basemap" hidden role="menu">{basemaps}</div>'
+        '<div class="mlegend" hidden></div>'
+        '<div class="mp-card" hidden></div>'
+        '</div>')
 
 
 def page_settings(d):
@@ -602,8 +636,6 @@ def page_settings(d):
     dashboard is built from, so they are saved to the repo like notes are and apply
     on the next build - within a few minutes of saving.
     """
-    days = "".join(f'<option value="{i}">{name}</option>' for i, name in enumerate(WEEKDAYS))
-    sess = {s["key"]: s for s in d["sessions"]}
     appearance = (
         '<div class="choices" id="themechoice" role="group" aria-label="Appearance">'
         '<button type="button" data-theme="system">Follow phone</button>'
@@ -612,30 +644,32 @@ def page_settings(d):
         '<p class="hint">"Follow phone" uses whatever your phone or PC is set to, '
         'including switching itself at night.</p>')
 
-    mapstyle = (
-        '<div class="choices" id="mapchoice" role="group" aria-label="Map style">'
-        '<button type="button" data-map="plain">Plain</button>'
-        '<button type="button" data-map="streets">Streets</button>'
+    maps = (
+        '<p class="eyebrow" style="margin:0 0 8px">Background</p>'
+        '<div class="choices" id="mapchoice" role="group" aria-label="Background map">'
+        '<button type="button" data-map="map">Map</button>'
+        '<button type="button" data-map="outdoor">Outdoor</button>'
         '<button type="button" data-map="satellite">Satellite</button></div>'
-        '<p class="hint">Which map a run opens with. You can still switch on the run itself.</p>')
+        '<p class="eyebrow" style="margin:16px 0 8px">Route line</p>'
+        '<div class="choices wrap" id="routechoice" role="group" aria-label="Route line">'
+        '<button type="button" data-route="solid">Solid</button>'
+        '<button type="button" data-route="glow">Glow</button>'
+        '<button type="button" data-route="hr">Heart rate</button>'
+        '<button type="button" data-route="pace">Pace</button>'
+        '<button type="button" data-route="elev">Elevation</button></div>'
+        '<p class="hint">What a map opens with. You can switch on the map itself, and the 3D button '
+        'tilts it over the real terrain.</p>')
 
     training = (
         f'<label class="field"><span>Maximum heart rate</span>'
         f'<input type="number" id="setmaxhr" min="120" max="230" value="{d["max_hr"]}"></label>'
         f'<p class="hint">Every zone is worked out from this. {bpm(d["max_hr"], 82)}–'
         f'{bpm(d["max_hr"], 88) - 1} bpm is your threshold band today.</p>'
-        f'<label class="field"><span>Plan week 1 starts</span>'
-        f'<input type="date" id="setstart" value="{d["plan_start"].isoformat()}"></label>'
-        f'<label class="field"><span>Threshold session</span>'
-        f'<select id="setday-threshold">{days}</select></label>'
-        f'<label class="field"><span>Easy run</span>'
-        f'<select id="setday-easy">{days}</select></label>'
-        f'<label class="field"><span>Long run</span>'
-        f'<select id="setday-long">{days}</select></label>'
         f'<div class="noterow"><button type="button" id="savetraining">Save</button>'
         f'<span class="hint" id="trainingstatus"></span></div>'
         f'<p class="hint">These change how the dashboard is built, so they appear after the '
-        f'next update - a few minutes. Saving needs the GitHub token below.</p>')
+        f'next update - a few minutes. To move a session to another day, drag it in the '
+        f'<a href="#/plan">Plan</a>. Saving needs the GitHub token below.</p>')
 
     syncing = (
         '<p class="hint" style="margin-top:0">Notes and the settings above are saved into your own '
@@ -660,7 +694,7 @@ def page_settings(d):
         f'</details>')
 
     return (card(appearance, head="Appearance")
-            + card(mapstyle, head="Maps")
+            + card(maps, head="Maps")
             + card(training, head="Training")
             + card(syncing, head="Saving and syncing")
             + card(about, head="About"))
@@ -673,29 +707,103 @@ def page_run(d):
 
 
 def page_progress(d):
-    used = [k for k in ORDER if any(d["week_km"][w][k] for w in d["weeks"])] or ["easy"]
-    legend = "".join(f'<span><i class="s{COLORS[k]}"></i>{NAMES[k]}</span>' for k in used)
-    volume = (f'<div class="legend">{legend}</div>{weekly_chart(d["weeks"], d["week_km"])}'
-              f'<p class="hint">Each bar is one week, coloured by the zone each run fell in. '
-              f'Blue should dominate.</p>')
+    max_hr, weeks, now = d["max_hr"], d["weeks"], d["this_monday"]
+
+    # ---- the headline numbers
+    effort, band = d["week_effort"].get(now, 0), d["effort_band"].get(now)
+    if band:
+        where = ("below" if effort < band[0] else "above" if effort > band[1] else "inside")
+        effort_note = f'usual {band[0]:.0f}–{band[1]:.0f} · {where}'
+    else:
+        effort_note = "this week so far"
+    ef_now, ef_before = d["ef_now"], d["ef_before"]
+    if ef_now and ef_before:
+        change = (ef_now / ef_before - 1) * 100
+        ef_note = f'{"+" if change >= 0 else "−"}{abs(change):.1f}% on the 4 weeks before'
+    else:
+        ef_note = "easy runs, 28 days"
+    cad_text = f'{d["cad_now"]:.0f}' if d["cad_now"] else "–"
+    ef_text = f"{ef_now:.2f}" if ef_now else "–"
+    tiles = (
+        '<div class="tiles four">'
+        f'<div class="tile"><div class="label">Effort this week</div><div class="value">{effort}</div>'
+        f'<div class="note">{effort_note}</div></div>'
+        f'<div class="tile"><div class="label">Easy share</div><div class="value">{d["easy_share"]}</div>'
+        f'<div class="note">28 days · goal ~80%</div></div>'
+        f'<div class="tile"><div class="label">Metres per beat</div>'
+        f'<div class="value">{ef_text}</div><div class="note">{ef_note}</div></div>'
+        f'<div class="tile"><div class="label">Cadence</div>'
+        f'<div class="value">{cad_text}<span class="unit">spm</span></div>'
+        f'<div class="note">average, 28 days</div></div>'
+        '</div>')
+
+    # ---- load
+    def load_tip(w, v):
+        band = d["effort_band"].get(w)
+        runs_n = sum(1 for r in d["runs"] if r["_date"].date() - timedelta(days=r["_date"].weekday()) == w)
+        return (f"Week of {w.strftime('%d.%m')}|Effort {v:.0f} from {runs_n} run{'s' if runs_n != 1 else ''}"
+                + (f"|Usual range {band[0]:.0f}–{band[1]:.0f}" if band else ""))
+    load = (column_chart(weeks, d["week_effort"], "Weekly training load", tip=load_tip, bands=d["effort_band"])
+            + '<p class="hint">Effort is heart-rate load: every minute of running counted 1 to 5 by how hard it '
+              'was (Edwards\' method, from your strap second by second). The shaded band is your usual range - '
+              '75–125% of the three weeks before. Building a little at a time and staying near the band is what '
+              'lets the body absorb the work; a week far above it is where injuries come from.</p>')
+
+    km_tip = lambda w, v: f"Week of {w.strftime('%d.%m')}|{v:.1f} km"
+    distance = column_chart(weeks, {w: sum(d["week_km"][w].values()) for w in weeks}, "Weekly distance",
+                            fmt=lambda v: f"{v:.0f}", tip=km_tip)
 
     zones = (zone_bar(d["zone_seconds"]) +
              f'<p class="hint">Last 28 days, by moving time. The Norwegian method wants roughly 80% easy - '
              f'you are at {d["easy_share"]}.</p>')
 
-    eff = (trend_chart(d["easy_points"], "Easy-run pace over time") +
-           f'<p class="hint">Average pace of your easy runs each week, at an average heart rate that stays '
-           f'under {bpm(d["max_hr"], 75)} bpm. If the line drifts down while the heart rate stays put, '
-           f'the engine is getting better.</p>')
+    scatter = (speed_hr_chart(d["speed_hr"], max_hr) +
+               '<p class="hint">One dot per run: heart rate across, pace up. Blue dots are the last four weeks, '
+               'grey ones older. As you get fitter the cloud shifts up and left - faster at the same heart rate. '
+               'Dots in the grey zone column are the runs to slow down next time.</p>')
 
-    thr = (trend_chart(d["thr_points"], "Threshold-session pace over time") +
-           f'<p class="hint">Your threshold sessions, whole-session pace including warm-up and cool-down. '
-           f'Same heart rate at a faster pace is the clearest sign the threshold work is paying off.</p>')
+    efficiency = (dot_trend(d["eff_points"], "Metres per heartbeat on easy runs",
+                            lambda v: f"{v:.2f}") +
+                  '<p class="hint">How far you travel for each heartbeat on easy and long runs. A rising line is '
+                  'the aerobic engine improving - the main thing easy running is for. Heat, hills and tiredness '
+                  'pull single runs down, so watch the line, not the dots.</p>')
 
-    return (card(volume, head="Weekly distance (km)")
+    reps = (dot_trend(d["rep_points"], "Threshold rep pace", lambda v: f"{int(v//60)}:{int(v%60):02d}", invert=True) +
+            f'<p class="hint">Average pace of the reps only - the laps at threshold heart rate '
+            f'({bpm(max_hr, 82)}+ bpm) - so warm-up, jogs and cool-down do not blur it. Faster reps at the same '
+            f'controlled heart rate is the clearest sign the threshold work is paying off.</p>')
+
+    cadence = (dot_trend(d["cad_points"], "Cadence per run", lambda v: f"{v:.0f}") +
+               '<p class="hint">Steps per minute, both feet. There is no magic number - it rises naturally with '
+               'speed, so threshold days sit higher than easy days. What helps is a slow drift upwards on easy runs '
+               'over months: shorter, quicker steps land softer.</p>')
+
+    rows = []
+    for r, dc in d["long_drift"]:
+        good = dc < 5
+        w = max(3, min(max(dc, 0), 12) / 12 * 100)          # a negative drift is simply steady
+        rows.append(
+            f'<a class="driftrow" href="#/run/{r["id"]}"><span class="dname2">{r["_date"].strftime("%d.%m")} · '
+            f'{fmt_hours(r["moving_time"])}</span>'
+            f'<span class="dbar"><i class="{"dgood" if good else "dwarn"}" style="width:{w:.0f}%"></i><em></em></span>'
+            f'<span class="dval">{dc:+.1f}%</span>'
+            f'<span class="pill {"ok-pill" if good else "warn"}">{"✓ steady" if good else "! drifting"}</span></a>')
+    drift = ((f'<div class="drift">{"".join(rows)}</div>' if rows else
+              '<p class="sub">No long runs with heart-rate detail yet.</p>') +
+             '<p class="hint">Aerobic decoupling compares the second half of a long run with the first: how much '
+             'less distance each heartbeat buys once you are tired. Under 5% means your heart rate held steady for '
+             'the pace - good endurance. Higher means the run was a touch too fast or too long for now. The first '
+             '10 minutes are left out while heart rate settles. The marker on each bar is 5%.</p>')
+
+    return (tiles
+            + card(load, head="Training load")
+            + card(scatter, head="Speed against heart rate")
+            + card(efficiency, head="Aerobic efficiency")
             + card(zones, head="Time in zones")
-            + card(eff, head="Easy pace at easy heart rate")
-            + card(thr, head="Threshold sessions"))
+            + card(reps, head="Threshold reps")
+            + card(drift, head="Long runs: heart-rate drift")
+            + card(cadence, head="Cadence")
+            + card(distance, head="Weekly distance (km)"))
 
 
 # ------------------------------------------------------------- 5. the shell
@@ -715,1705 +823,13 @@ def icon(name):
             f'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{ICONS[name]}</svg>')
 
 
-CSS = """
-:root {
-  color-scheme: light;
-  --page:#f9f9f7; --surface:#fcfcfb; --raise:#f2f1ec; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
-  --grid:#e1e0d9; --axis:#c3c2b7; --ring:rgba(11,11,11,.10); --good:#006300; --warn:#a75500;
-  --accent:#2a78d6; --accentsoft:rgba(42,120,214,.10);
-  --s0:#b8b7b1; --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#eda100;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --page:#0d0d0d; --surface:#1a1a19; --raise:#242422; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
-    --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10); --good:#0ca30c; --warn:#d98a1f;
-    --accent:#3987e5; --accentsoft:rgba(57,135,229,.16);
-    --s0:#5a5955; --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
-  }
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --page:#0d0d0d; --surface:#1a1a19; --raise:#242422; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
-  --grid:#2c2c2a; --axis:#383835; --ring:rgba(255,255,255,.10); --good:#0ca30c; --warn:#d98a1f;
-  --accent:#3987e5; --accentsoft:rgba(57,135,229,.16);
-  --s0:#5a5955; --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#c98500;
-}
-* { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-body { margin:0; background:var(--page); color:var(--ink);
-  font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
-a { color:var(--accent); }
-main { max-width:900px; margin:0 auto; padding:18px 16px calc(80px + env(safe-area-inset-bottom)); }
-.page { display:none; }
-.page.on { display:block; animation:fade .18s ease-out; }
-@keyframes fade { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
-@media (prefers-reduced-motion:reduce) { .page.on { animation:none; } }
-
-/* ---- menu ---- */
-.tabs { position:fixed; z-index:9; left:0; right:0; bottom:0; display:flex;
-  background:var(--surface); border-top:1px solid var(--ring); padding-bottom:env(safe-area-inset-bottom); }
-.tabs .brand { display:none; }
-.tabs a { flex:1; display:flex; flex-direction:column; align-items:center; gap:3px;
-  padding:9px 0 8px; font-size:11px; font-weight:500; color:var(--muted); text-decoration:none; }
-.tabs svg { width:23px; height:23px; }
-.tabs a[aria-current=page] { color:var(--accent); }
-
-/* ---- headings ---- */
-h1 { font-size:24px; margin:0 0 2px; letter-spacing:-.01em; }
-h2 { font-size:15px; margin:0 0 12px; display:flex; align-items:center; gap:8px; }
-h3 { font-size:19px; margin:0 0 6px; letter-spacing:-.01em; }
-.sub { color:var(--muted); font-size:13px; margin:0 0 18px; }
-.sub.tight { margin-bottom:12px; }
-.more { margin-left:auto; font-size:13px; font-weight:500; text-decoration:none; }
-.hint { color:var(--muted); font-size:13px; margin:12px 0 0; }
-
-/* ---- cards & tiles ---- */
-.card { background:var(--surface); border:1px solid var(--ring); border-radius:14px; padding:16px; margin:0 0 14px; }
-.card.hero { border-color:var(--accent); box-shadow:0 1px 0 var(--accentsoft), 0 0 0 3px var(--accentsoft); }
-.nexthead { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
-.when { color:var(--muted); font-size:13px; }
-.target { margin:0 0 10px; color:var(--ink2); font-size:14px; }
-.detail { margin:0; color:var(--ink2); font-size:14px; }
-.pill { font-size:12px; font-weight:500; color:var(--ink2); border:1px solid var(--ring);
-  border-radius:99px; padding:1px 9px; margin-left:auto; white-space:nowrap; }
-.pill.hot { background:var(--accent); border-color:var(--accent); color:#fff; }
-.pill.warn { color:var(--warn); border-color:var(--warn); }
-.pill.ok-pill { color:var(--good); border-color:var(--good); }
-.tiles { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:0 0 14px; }
-.tile { background:var(--surface); border:1px solid var(--ring); border-radius:14px; padding:12px 13px; }
-.tile .label { color:var(--ink2); font-size:12px; }
-.tile .value { font-size:26px; font-weight:600; letter-spacing:-.02em; white-space:nowrap;
-  font-variant-numeric:tabular-nums; }
-.tile .unit { font-size:14px; font-weight:500; color:var(--ink2); margin-left:3px; }
-.tile .note { color:var(--muted); font-size:11px; line-height:1.35; }
-
-/* ---- week strip ---- */
-.week { display:grid; grid-template-columns:repeat(7,1fr); gap:5px; }
-.day { text-align:center; border:1px solid var(--ring); border-radius:11px; padding:7px 2px 6px;
-  background:var(--page); min-width:0; }
-.day .dname { display:block; font-size:11px; color:var(--muted); }
-.day .dmark { display:grid; place-items:center; width:24px; height:24px; margin:3px auto 2px;
-  border-radius:50%; font-size:13px; line-height:1; }
-.day .dlabel.wide { display:none; }
-.day .dlabel { display:block; font-size:10px; color:var(--ink2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.day.done .dmark { background:var(--good); color:#fff; }
-.day.planned .dmark { border:1.5px solid var(--accent); color:var(--accent); }
-.day.planned.late .dmark { border-color:var(--warn); color:var(--warn); }
-.day.rest .dmark { color:var(--axis); }
-.day.today { border-color:var(--accent); background:var(--accentsoft); }
-
-/* ---- latest run ---- */
-.runhead { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
-.runhead b { font-size:16px; }
-.runhead .when { margin-left:auto; }
-.metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:12px 0 8px; }
-.metrics div { background:var(--raise); border-radius:10px; padding:8px 6px; text-align:center; }
-.metrics .m { display:block; font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
-.metrics .u { font-size:11px; color:var(--muted); }
-.zoneline { margin:0; font-size:13px; color:var(--ink2); }
-.note-coach { margin:10px 0 0; padding-left:11px; border-left:3px solid var(--s1); color:var(--ink2); font-size:14px; }
-
-/* ---- plan ---- */
-.plan { display:grid; gap:14px; }
-.session { display:flex; gap:11px; }
-.session .when { display:block; }
-.session p { margin:3px 0 0; color:var(--ink2); font-size:14px; }
-.session .did { color:var(--good); font-size:13px; }
-.ok,.todo { flex:none; width:22px; height:22px; border-radius:50%; display:grid; place-items:center;
-  font-size:13px; margin-top:2px; }
-.ok { background:var(--good); color:#fff; }
-.todo { border:1.5px solid var(--axis); color:transparent; }
-.steps { display:grid; gap:8px; }
-.step { display:flex; align-items:center; gap:10px; flex-wrap:wrap; border:1px solid var(--ring);
-  border-radius:11px; padding:9px 11px; }
-.step .pill { margin:0; }
-.step .rest { color:var(--muted); font-size:13px; }
-.step.now { border-color:var(--accent); background:var(--accentsoft); }
-.nowtag { margin-left:auto; font-size:12px; font-weight:600; color:var(--accent); }
-
-/* ---- runs list ---- */
-.month { font-size:13px; font-weight:600; color:var(--muted); text-transform:uppercase;
-  letter-spacing:.06em; margin:18px 0 6px; }
-.month:first-child { margin-top:0; }
-.runrow { border-top:1px solid var(--grid); padding:10px 0; }
-.rmain { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
-.rdate { font-size:13px; color:var(--muted); font-variant-numeric:tabular-nums; min-width:60px; }
-.rname { font-weight:500; }
-.rzone { margin-left:auto; font-size:12px; color:var(--ink2); white-space:nowrap; }
-.rnums { display:flex; align-items:center; gap:14px; margin-top:3px; padding-left:68px;
-  color:var(--muted); font-size:12px; }
-.rnums b { color:var(--ink2); font-size:13px; font-variant-numeric:tabular-nums; }
-
-/* ---- run page ---- */
-.back { display:inline-block; font-size:14px; font-weight:500; text-decoration:none; margin:0 0 10px; }
-.runtitle { font-size:22px; margin:0 0 2px; }
-.card.nopad { padding:0; overflow:hidden; }
-.mapwrap { height:215px; }
-.map { position:relative; width:100%; min-height:140px; overflow:hidden; background:var(--grid);
-  touch-action:none; cursor:grab; user-select:none; }
-.map.grabbing { cursor:grabbing; }
-.mapctl, .mapzoom { position:absolute; z-index:2; display:flex; gap:4px; }
-.mapctl { left:8px; top:8px; }
-.mapzoom { right:8px; top:8px; flex-direction:column; }
-.mapctl button, .mapzoom button, .mapbig {
-  font:inherit; font-size:12px; font-weight:500; line-height:1; padding:6px 9px; border-radius:7px;
-  border:1px solid var(--ring); background:var(--surface); color:var(--ink); cursor:pointer;
-  box-shadow:0 1px 3px rgba(0,0,0,.18); }
-.mapzoom button { width:30px; height:30px; font-size:16px; padding:0; }
-.mapctl button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-.mapbig { position:absolute; z-index:2; right:8px; top:76px; }
-.mapinner { position:absolute; inset:0; will-change:transform; }
-.maptiles { position:absolute; inset:0; }
-img.maptile { position:absolute; }
-svg.route { position:absolute; inset:0; width:100%; height:100%; }
-/* The casing is the quiet edge drawn under the route, so the line stays
-   readable over a satellite photo or a busy street map. */
-:root { --routecase:rgba(255,255,255,.85); }
-:root[data-theme="dark"] { --routecase:rgba(0,0,0,.6); }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --routecase:rgba(0,0,0,.6); }
-}
-.rline { fill:none; stroke-linejoin:round; stroke-linecap:round; }
-.startdot { fill:#fff; stroke:#0b0b0b; stroke-width:2.5; }
-.attrib { position:absolute; left:3px; bottom:2px; z-index:2; font-size:10px; color:#333;
-  background:rgba(255,255,255,.72); padding:0 4px; border-radius:3px; pointer-events:none; }
-
-/* ---- route style picker ---- */
-/* Bottom right, clear of the map attribution in the opposite corner. */
-.mapstyle { position:absolute; z-index:3; right:8px; bottom:8px; }
-.stylebtn { display:flex; align-items:center; gap:7px; font:inherit; font-size:12px;
-  font-weight:500; line-height:1; padding:6px 10px 6px 7px; border-radius:7px;
-  border:1px solid var(--ring); background:var(--surface); color:var(--ink); cursor:pointer;
-  box-shadow:0 1px 3px rgba(0,0,0,.18); }
-.stylewatch { width:16px; height:8px; border-radius:99px; flex:none;
-  box-shadow:0 0 0 1px var(--ring) inset; }
-/* Opens upward over the map, which clips anything taller than itself, so it
-   stays compact enough to fit the small map on the run page. */
-.stylemenu[hidden], .maplegend[hidden] { display:none; }
-.stylemenu { position:absolute; right:0; bottom:calc(100% + 6px); width:150px; padding:4px;
-  border-radius:11px; border:1px solid var(--ring); background:var(--surface);
-  box-shadow:0 8px 26px rgba(0,0,0,.28); display:flex; flex-direction:column; gap:1px; }
-.stylemenu button { display:flex; align-items:center; gap:9px; text-align:left; font:inherit;
-  font-size:13px; line-height:1; padding:8px 9px; border:0; border-radius:8px;
-  background:none; color:var(--ink); cursor:pointer; }
-.stylemenu button:hover { background:var(--raise); }
-.stylemenu button.on { background:var(--accentsoft); font-weight:600; }
-.stylemenu .stylewatch { width:20px; height:7px; }
-.maplegend { position:absolute; z-index:2; right:8px; bottom:44px; display:flex; align-items:center;
-  gap:7px; font-size:10.5px; color:var(--ink); padding:4px 8px; border-radius:7px;
-  background:var(--surface); border:1px solid var(--ring); box-shadow:0 1px 3px rgba(0,0,0,.18);
-  pointer-events:none; font-variant-numeric:tabular-nums; }
-.maplegend i { display:block; width:62px; height:7px; border-radius:99px; }
-.stats { display:grid; grid-template-columns:repeat(4,1fr); }
-.stats div { padding:11px 6px; text-align:center; box-shadow:inset -1px -1px 0 var(--ring); }
-.stats .m { display:block; font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
-.stats .u { font-size:11px; color:var(--muted); }
-.readout { margin:0 0 10px; font-size:13px; color:var(--ink2); min-height:20px;
-  font-variant-numeric:tabular-nums; }
-h2 .more { font:inherit; font-size:13px; font-weight:500; color:var(--accent); background:none;
-  border:0; padding:0; cursor:pointer; margin-left:auto; }
-.charts { cursor:zoom-in; }
-.clabel i { font-style:normal; color:var(--axis); }
-/* The pop-out charts are redrawn on every zoom step. `.chartgrab` sits on top
-   and survives those redraws, so a pinch is never cut short by the chart under
-   the fingers being replaced. pan-y keeps one-finger scrolling of the sheet. */
-.zoomwrap { position:relative; cursor:default; }
-.chartgrab { position:absolute; inset:0; touch-action:pan-y; }
-
-/* ---- pop-out sheet ---- */
-body.noscroll { overflow:hidden; }
-.sheet { position:fixed; inset:0; z-index:30; background:rgba(0,0,0,.45); display:flex;
-  align-items:center; justify-content:center; padding:0; }
-.sheetbox { background:var(--page); width:100%; height:100%; display:flex; flex-direction:column; }
-.sheethead { display:flex; align-items:center; gap:10px; padding:12px 16px;
-  border-bottom:1px solid var(--ring); background:var(--surface); }
-.sheetclose { margin-left:auto; font:inherit; font-size:17px; line-height:1; padding:6px 10px;
-  border:1px solid var(--ring); border-radius:8px; background:var(--page); color:var(--ink); cursor:pointer; }
-.sheetbody { padding:16px; overflow:auto; flex:1; }
-.bigmap { height:min(70vh,560px); border-radius:12px; overflow:hidden; border:1px solid var(--ring); }
-.zoombar { display:flex; flex-wrap:wrap; gap:8px; margin:0 0 6px; position:sticky; top:-16px;
-  z-index:2; background:var(--page); padding:4px 0 8px; }
-.zoombar button { font:inherit; font-size:14px; padding:9px 14px; border-radius:9px;
-  border:1px solid var(--ring); background:var(--surface); color:var(--ink); cursor:pointer; }
-.zoombar button:hover { background:var(--raise); }
-@media (min-width:860px) {
-  .sheet { padding:24px; }
-  .sheetbox { max-width:1000px; max-height:92vh; height:auto; border-radius:16px; overflow:hidden; }
-}
-
-/* ---- settings ---- */
-.choices { display:flex; gap:8px; flex-wrap:wrap; }
-.choices button { flex:1; min-width:90px; font:inherit; font-size:14px; padding:10px 8px;
-  border:1px solid var(--ring); border-radius:10px; background:var(--page); color:var(--ink);
-  cursor:pointer; }
-.choices button:hover { background:var(--raise); }
-.choices button.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
-.field { display:flex; align-items:center; gap:12px; justify-content:space-between;
-  padding:9px 0; border-bottom:1px solid var(--grid); font-size:15px; }
-.field:last-of-type { border-bottom:0; }
-.field input, .field select { font:inherit; font-size:15px; padding:8px 10px; border-radius:9px;
-  border:1px solid var(--ring); background:var(--page); color:var(--ink); min-width:140px; }
-.field input[type=number] { width:100px; min-width:0; }
-
-/* ---- notes ---- */
-#notetext, #ghtoken { width:100%; font:inherit; font-size:15px; padding:10px 12px; border-radius:10px;
-  border:1px solid var(--ring); background:var(--page); color:var(--ink); resize:vertical; }
-.noterow { display:flex; align-items:center; gap:10px; margin-top:10px; flex-wrap:wrap; }
-.noterow button { font:inherit; font-weight:600; font-size:14px; padding:9px 16px; border:0;
-  border-radius:9px; background:var(--accent); color:#fff; cursor:pointer; }
-.noterow button:disabled { opacity:.6; }
-.noterow .hint { margin:0; flex:1; min-width:140px; }
-.tokenbox { margin-top:14px; border-top:1px solid var(--grid); padding-top:10px; }
-.tokenbox summary { font-size:13px; color:var(--accent); cursor:pointer; }
-.tokenbox .noterow input { flex:1; min-width:180px; }
-.charts { display:grid; gap:14px; }
-.chartbox { position:relative; }
-.clabel { font-size:12px; color:var(--muted); }
-.cchart { touch-action:pan-y; }
-.cline { fill:none; stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
-.cline.hr { stroke:var(--s2); } .cline.pace { stroke:var(--s1); } .cline.elev { stroke:var(--axis); }
-.areafill { fill:var(--grid); stroke:none; }
-.cursor { stroke:var(--ink2); stroke-width:1; opacity:0; }
-.band { opacity:.13; }
-.band.zeasy { fill:var(--s1); } .band.zmoderate { fill:var(--s2); }
-.band.zthreshold { fill:var(--s3); } .band.zhard { fill:var(--s4); }
-tr.work td { color:var(--s3); font-weight:600; }
-.splits { display:grid; gap:3px; }
-.split { display:flex; align-items:center; gap:8px; font-size:13px; font-variant-numeric:tabular-nums; }
-.split .km { width:22px; color:var(--muted); text-align:right; }
-.split .sbar { flex:1; background:var(--grid); border-radius:4px; height:16px; overflow:hidden; }
-.split .sbar i { display:block; height:100%; border-radius:4px; }
-.split .sp { width:44px; text-align:right; }
-.split .sh { width:38px; text-align:right; color:var(--muted); }
-.chev { margin-left:auto; color:var(--axis); font-size:17px; line-height:1; }
-a.runrow { display:block; color:inherit; text-decoration:none; }
-a.runrow:hover { background:var(--raise); }
-
-/* ---- charts ---- */
-svg { width:100%; height:auto; display:block; }
-.grid { stroke:var(--grid); stroke-width:1; }
-.axis { stroke:var(--axis); stroke-width:1; }
-.line { fill:none; stroke:var(--s1); stroke-width:2.5; stroke-linejoin:round; stroke-linecap:round; }
-.pt { fill:var(--surface); stroke:var(--s1); stroke-width:2.5; }
-.tick { fill:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
-.hit { fill:transparent; }
-.wk:hover .hit { fill:var(--grid); opacity:.5; }
-rect.s0,i.s0,.bar-seg.s0 { fill:var(--s0); background:var(--s0); }
-rect.s1,i.s1,.bar-seg.s1 { fill:var(--s1); background:var(--s1); }
-rect.s2,i.s2,.bar-seg.s2 { fill:var(--s2); background:var(--s2); }
-rect.s3,i.s3,.bar-seg.s3 { fill:var(--s3); background:var(--s3); }
-rect.s4,i.s4,.bar-seg.s4 { fill:var(--s4); background:var(--s4); }
-.legend { display:flex; flex-wrap:wrap; gap:14px; color:var(--ink2); font-size:13px; margin-bottom:10px; }
-.legend i,.dot { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; }
-.bar { display:flex; height:16px; border-radius:8px; overflow:hidden; gap:2px; background:var(--grid); }
-.bar-seg { height:100%; }
-.zlist { margin-top:12px; display:grid; gap:2px; }
-.zrow { display:flex; justify-content:space-between; gap:12px; font-size:14px; color:var(--ink2);
-  padding:5px 0; border-bottom:1px solid var(--grid); }
-.zrow:last-child { border-bottom:0; }
-#update { position:fixed; z-index:40; left:50%; transform:translateX(-50%);
-  bottom:calc(74px + env(safe-area-inset-bottom)); display:flex; align-items:center; gap:10px;
-  background:var(--ink); color:var(--page); font-size:14px; white-space:nowrap;
-  padding:8px 8px 8px 16px; border-radius:99px; box-shadow:0 6px 20px rgba(0,0,0,.28); }
-#update[hidden] { display:none; }
-#updatego { font:inherit; font-weight:600; font-size:13px; padding:6px 13px; border:0;
-  border-radius:99px; background:var(--accent); color:#fff; cursor:pointer; }
-@media (min-width:860px) { #update { bottom:24px; left:calc(50% + 108px); } }
-#tip { position:fixed; pointer-events:none; background:var(--surface); color:var(--ink);
-  border:1px solid var(--ring); border-radius:8px; padding:8px 10px; font-size:13px;
-  box-shadow:0 4px 16px rgba(0,0,0,.12); display:none; white-space:nowrap; z-index:20; }
-#tip b { display:block; margin-bottom:2px; }
-
-/* ---- tables ---- */
-.scroll { overflow-x:auto; }
-table { width:100%; border-collapse:collapse; font-size:14px; }
-th { text-align:left; color:var(--ink2); font-weight:500; font-size:13px; padding:6px 8px;
-  border-bottom:1px solid var(--axis); white-space:nowrap; }
-td { padding:7px 8px; border-bottom:1px solid var(--grid); }
-td.wrap { min-width:150px; }
-.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
-.desc { color:var(--muted); font-size:13px; margin-left:16px; }
-
-/* ---- phone ---- */
-@media (max-width:600px) { .tick { font-size:17px; } }
-@media (max-width:430px) {
-  .tiles { gap:8px; }
-  .tile { padding:10px; }
-  .tile .value { font-size:21px; }
-  .tile .label { font-size:11px; }
-  .metrics { gap:6px; }
-  .metrics .m { font-size:15px; }
-  .rnums { padding-left:0; gap:12px; }
-  .tick { font-size:22px; }
-  .stats { grid-template-columns:repeat(3,1fr); }
-  .sheetbody { padding:12px; }
-  .zoombar { top:-12px; gap:6px; }
-  .zoombar button[data-act="in"], .zoombar button[data-act="out"] { flex:1 1 calc(50% - 3px); }
-  .zoombar button[data-act="left"], .zoombar button[data-act="right"] { flex:0 0 58px; }
-  .zoombar button[data-act="reset"] { flex:1; }
-  .mapctl button { font-size:11px; padding:5px 7px; }
-  .mapctl { gap:3px; left:6px; top:6px; }
-  .mapstyle { right:6px; bottom:6px; }
-  .maplegend { right:6px; bottom:40px; font-size:10px; padding:3px 6px; gap:5px; }
-  .maplegend i { width:52px; }
-  .zoombar button { flex:1; min-width:calc(50% - 4px); }
-  .stats .m { font-size:15px; }
-  .split .sp { width:40px; }
-}
-
-/* ---- desktop ---- */
-@media (min-width:860px) {
-  body { padding-left:216px; }
-  main { padding:32px 28px 56px; }
-  .tabs { top:0; bottom:0; right:auto; width:216px; flex-direction:column; justify-content:flex-start;
-    gap:2px; border-top:0; border-right:1px solid var(--ring); padding:22px 12px; }
-  .tabs .brand { display:block; font-size:15px; font-weight:600; padding:0 12px 16px; color:var(--ink); }
-  .tabs a { flex:none; flex-direction:row; justify-content:flex-start; gap:12px; font-size:15px;
-    padding:10px 12px; border-radius:10px; }
-  .tabs a:hover { background:var(--raise); }
-  .tabs a[aria-current=page] { background:var(--accentsoft); }
-  .tiles { gap:14px; }
-  .card { padding:20px; }
-  .day .dlabel { display:none; }
-  .day .dlabel.wide { display:block; font-size:12px; }
-  .tick { font-size:11px; }
-}
-"""
-
-RUN_VIEW = r"""
-(function () {
-  var runs = window.RUNS || [], conf = window.CONF || {}, byId = {};
-  runs.forEach(function (r) { byId[r.id] = r; });
-  var host = document.getElementById('rundetail');
-  if (!host) return;
-
-  // ---------- small helpers ----------
-  function pad(n) { return (n < 10 ? '0' : '') + n; }
-  function hms(s) {
-    s = Math.round(s || 0);
-    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-    return h ? h + ':' + pad(m) + ':' + pad(s % 60) : m + ':' + pad(s % 60);
-  }
-  function pace(sec) {
-    if (!isFinite(sec) || sec <= 0 || sec > 1800) return '-';
-    sec = Math.round(sec);
-    return Math.floor(sec / 60) + ':' + pad(sec % 60);
-  }
-  function esc(t) { var d = document.createElement('div'); d.textContent = t == null ? '' : t; return d.innerHTML; }
-  function zoneOf(hr) {
-    var p = hr / conf.maxhr * 100, z = conf.zones;
-    for (var i = 0; i < z.length; i++) if (p >= z[i][2] && p < z[i][3]) return z[i][0];
-    return 'hard';
-  }
-  function zoneColor(k) { return 's' + conf.colors[k]; }
-  function dateText(iso) {
-    var d = new Date(iso.replace(' ', 'T'));
-    return conf.days[(d.getDay() + 6) % 7] + ' ' + pad(d.getDate()) + '.' + pad(d.getMonth() + 1) + '.' +
-      d.getFullYear() + ' · ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-  }
-  // ---------- the route, on a map you can drag and zoom ----------
-  function decodePoly(str) {
-    var pts = [], i = 0, lat = 0, lng = 0, b, shift, result;
-    while (i < str.length) {
-      shift = 0; result = 0;
-      do { b = str.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
-      lat += (result & 1) ? ~(result >> 1) : (result >> 1);
-      shift = 0; result = 0;
-      do { b = str.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
-      lng += (result & 1) ? ~(result >> 1) : (result >> 1);
-      pts.push([lat / 1e5, lng / 1e5]);
-    }
-    return pts;
-  }
-  function project(lat, lng, z) {            // web mercator, in tile units
-    var n = Math.pow(2, z), s = Math.sin(lat * Math.PI / 180);
-    return [(lng + 180) / 360 * n, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n];
-  }
-
-  var ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
-  var LAYERS = [
-    // A quiet grey basemap, so the route is the thing you see. It has a light and a
-    // dark version, and follows whichever appearance the app is in.
-    { id: 'plain', name: 'Plain', max: 16, attrib: '© Esri, © OpenStreetMap',
-      url: ESRI + 'Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-      darkUrl: ESRI + 'Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}' },
-    { id: 'streets', name: 'Streets', max: 19, attrib: '© OpenStreetMap',
-      url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' },
-    { id: 'satellite', name: 'Satellite', max: 19, attrib: 'Imagery © Esri',
-      url: ESRI + 'World_Imagery/MapServer/tile/{z}/{y}/{x}' }
-  ];
-  function layerById(id) {
-    for (var i = 0; i < LAYERS.length; i++) if (LAYERS[i].id === id) return LAYERS[i];
-    return LAYERS[0];
-  }
-
-  /* ----------------------------------------------------------------
-   * Route styles
-   *
-   * Strava calls these "stat maps": the line is coloured by what you were
-   * doing at that point of the run rather than being one flat colour. The same
-   * ideas are here, with the app's own zone colours for heart rate so the map
-   * matches the zone bars on every other page.
-   *
-   * Everything below is deliberately generic - a style is a recipe of stroked
-   * layers - because the heat map page will draw many routes with the same
-   * code, just fed overlap counts instead of heart rate.
-   * -------------------------------------------------------------- */
-
-  // Zone colours, matching --s1..--s4 in the stylesheet. Fixed rather than read
-  // from CSS: over a map photo these have to stay readable in either appearance.
-  var ZONE_INK = { easy: '#2a78d6', moderate: '#eb6834', threshold: '#1baf7a',
-                   hard: '#eda100', nohr: '#b8b7b1' };
-
-  function hex2rgb(h) {
-    return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
-  }
-  // A colour t of the way (0..1) along a list of stops.
-  function ramp(stops, t) {
-    t = t < 0 ? 0 : t > 1 ? 1 : t;
-    var f = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(f)), k = f - i;
-    var a = hex2rgb(stops[i]), b = hex2rgb(stops[i + 1]);
-    return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * k) + ',' +
-      Math.round(a[1] + (b[1] - a[1]) * k) + ',' +
-      Math.round(a[2] + (b[2] - a[2]) * k) + ')';
-  }
-
-  var PACE_RAMP = ['#3b6fd4', '#1ca37a', '#eda100', '#e8462a'];   // slow to fast
-  var ELEV_RAMP = ['#2e8b57', '#9dbb3f', '#e0b03c', '#9c5a2c'];   // low to high
-
-  /*
-   * A style says how to draw the line. `layers` are stroked one after another,
-   * widest first, so a casing or a glow can sit under the route itself.
-   * `metric` names which stream colours it; without one the line is flat.
-   */
-  var ROUTE_STYLES = [
-    { id: 'solid', name: 'Solid', swatch: '#e8462a',
-      hint: 'One clear line with a contrasting edge.',
-      layers: [{ w: 7, casing: true }, { w: 4, color: '#e8462a' }] },
-    { id: 'glow', name: 'Glow', swatch: '#ff7a2f',
-      hint: 'The warm heat-map look - best on satellite and in dark mode.',
-      layers: [{ w: 17, color: '#ff5e14', op: 0.16 }, { w: 10, color: '#ff7a2f', op: 0.34 },
-               { w: 4.5, color: '#ffc061', op: 0.95 }, { w: 1.6, color: '#fff3d6' }] },
-    { id: 'hr', name: 'Heart rate', swatch: '#1baf7a', metric: 'hr',
-      hint: 'Coloured by the zone you were in, like the zone bars.',
-      layers: [{ w: 7.5, casing: true }, { w: 4.5, metric: true }] },
-    { id: 'pace', name: 'Pace', swatch: '#3b6fd4', metric: 'sp',
-      hint: 'Blue where you ran slowest, red where you ran fastest.',
-      layers: [{ w: 7.5, casing: true }, { w: 4.5, metric: true }] },
-    { id: 'elev', name: 'Elevation', swatch: '#9dbb3f', metric: 'al',
-      hint: 'Green in the low places, brown on the high ground.',
-      layers: [{ w: 7.5, casing: true }, { w: 4.5, metric: true }] }
-  ];
-  // A swatch that looks like the line the style draws: flat for the plain ones,
-  // the colour ramp itself for the ones that paint by a stream.
-  ROUTE_STYLES.forEach(function (s) {
-    var stops = s.id === 'hr'
-      ? [ZONE_INK.easy, ZONE_INK.moderate, ZONE_INK.threshold, ZONE_INK.hard]
-      : s.id === 'pace' ? PACE_RAMP : s.id === 'elev' ? ELEV_RAMP : null;
-    s.ink = stops ? 'linear-gradient(to right,' + stops.join(',') + ')' : s.swatch;
-  });
-  function styleById(id) {
-    for (var i = 0; i < ROUTE_STYLES.length; i++) if (ROUTE_STYLES[i].id === id) return ROUTE_STYLES[i];
-    return ROUTE_STYLES[0];
-  }
-  var savedStyle = (function () {
-    try { return localStorage.getItem('pref-route') || 'solid'; } catch (e) { return 'solid'; }
-  })();
-
-  /*
-   * Line up a stream with the drawn route.
-   *
-   * The two do not match point for point: the route comes from Strava's
-   * summary_polyline, which keeps more points on bends and fewer on straights,
-   * while the streams are ~160 evenly spaced samples. So walk the route adding
-   * up its length, and for each point look up the sample at the same distance
-   * into the run. Returns one value per route point, or null when that stream
-   * was never recorded.
-   */
-  function alongRoute(run, pts, key) {
-    var stream = run[key];
-    if (!stream || !stream.length || !run.d || !run.d.length || pts.length < 2) return null;
-    var cum = [0], i, total;
-    for (i = 1; i < pts.length; i++) {
-      var dy = pts[i][0] - pts[i - 1][0];
-      var dx = (pts[i][1] - pts[i - 1][1]) * Math.cos(pts[i][0] * Math.PI / 180);
-      cum.push(cum[i - 1] + Math.sqrt(dx * dx + dy * dy));
-    }
-    total = cum[cum.length - 1];
-    var runEnd = run.d[run.d.length - 1];
-    if (!total || !runEnd) return null;
-    var out = [], j = 0, any = false;
-    for (i = 0; i < pts.length; i++) {
-      var want = cum[i] / total * runEnd;
-      while (j < run.d.length - 1 && run.d[j + 1] < want) j++;
-      var v = stream[j];
-      // A zero means "not recorded" for heart rate and speed. For altitude it
-      // means sea level, which is a real height.
-      if (v == null || (v === 0 && key !== 'al')) { out.push(null); } else { out.push(v); any = true; }
-    }
-    return any ? out : null;
-  }
-
-  // The colour for one point, 0..1 of the way through the metric's range.
-  function metricColor(styleId, value, lo, hi, maxhr) {
-    if (value == null) return null;
-    if (styleId === 'hr') {
-      var pct = value / (maxhr || 205) * 100;
-      return ZONE_INK[pct < 75 ? 'easy' : pct < 82 ? 'moderate' : pct < 88 ? 'threshold' : 'hard'];
-    }
-    var t = hi > lo ? (value - lo) / (hi - lo) : 0.5;
-    return ramp(styleId === 'elev' ? ELEV_RAMP : PACE_RAMP, t);
-  }
-  var savedLayer = (function () {
-    try { return localStorage.getItem('dash-layer') || localStorage.getItem('pref-map') || 'plain'; }
-    catch (e) { return 'plain'; }
-  })();
-  function isDark() {
-    var set = document.documentElement.getAttribute('data-theme');
-    if (set) return set === 'dark';
-    return window.matchMedia('(prefers-color-scheme: dark)').matches;
-  }
-  // Tiles are 256px pictures. On a phone screen that is two device pixels per CSS
-  // pixel they look soft, so fetch one zoom level deeper and draw them at half
-  // size - four sharper tiles in place of one blurry one.
-  var DPR = Math.min(2, Math.round(window.devicePixelRatio || 1));
-  var FINER = DPR >= 2 ? 1 : 0;
-  var TILE = 256 / (FINER ? 2 : 1);
-
-  /*
-   * A small slippy map, written by hand so the dashboard needs no third-party
-   * JavaScript. Tiles and the route live in ONE moving layer, so a pinch scales
-   * both together and the route can never lag behind the map under it.
-   */
-  function SlippyMap(el, points, opts) {
-    opts = opts || {};
-    var self = this;
-    this.el = el;
-    this.pts = points || [];
-    this.layer = layerById(savedLayer);
-    this.style = styleById(savedStyle);
-    this.run = opts.run || null;
-    this.maxhr = (window.CONF && CONF.maxhr) || 205;
-    // Every stream the route can be coloured by, lined up with the drawn points
-    // once here rather than on each of the many redraws a drag causes.
-    this.metrics = {};
-    if (this.run) {
-      this.metrics.hr = alongRoute(this.run, this.pts, 'hs');
-      this.metrics.sp = alongRoute(this.run, this.pts, 'sp');
-      this.metrics.al = alongRoute(this.run, this.pts, 'al');
-    }
-    if (this.style.metric && !this.metrics[this.style.metric]) this.style = ROUTE_STYLES[0];
-    this.z = 14; this.cx = 0; this.cy = 0;          // centre, in pixels at zoom z
-    el.classList.add('map');
-    el.innerHTML = '<div class="mapinner">' +
-      '<div class="maptiles"></div>' +
-      '<svg class="route" preserveAspectRatio="none"></svg></div>' +
-      '<div class="mapctl">' +
-      LAYERS.map(function (l) {
-        return '<button type="button" data-layer="' + l.id + '">' + l.name + '</button>';
-      }).join('') + '</div>' +
-      '<div class="mapzoom"><button type="button" data-zoom="1" aria-label="Zoom in">+</button>' +
-      '<button type="button" data-zoom="-1" aria-label="Zoom out">−</button></div>' +
-      '<div class="mapstyle"><button type="button" class="stylebtn" aria-haspopup="true">' +
-      '<span class="stylewatch"></span><span class="stylename"></span></button>' +
-      '<div class="stylemenu" hidden>' + ROUTE_STYLES.map(function (s) {
-        return '<button type="button" data-style="' + s.id + '" title="' + s.hint + '">' +
-          '<span class="stylewatch" style="background:' + s.ink + '"></span>' +
-          s.name + '</button>';
-      }).join('') + '</div></div>' +
-      '<div class="maplegend" hidden></div>' +
-      (opts.expand ? '<button type="button" class="mapbig" title="Bigger">⤢</button>' : '') +
-      '<span class="attrib"></span>';
-    this.inner = el.querySelector('.mapinner');
-    this.tiles = el.querySelector('.maptiles');
-    this.svg = el.querySelector('.route');
-    this.menu = el.querySelector('.stylemenu');
-    this.legend = el.querySelector('.maplegend');
-    this.attrib = el.querySelector('.attrib');
-    this.fit();
-    this.bind(opts);
-  }
-
-  // The lowest and highest value of the stream this style paints with, ignoring
-  // the extremes so one GPS spike cannot flatten the whole colour range.
-  SlippyMap.prototype.span = function () {
-    var vals = (this.metrics[this.style.metric] || []).filter(function (v) { return v != null; });
-    if (vals.length < 4) return null;
-    vals = vals.slice().sort(function (a, b) { return a - b; });
-    var lo = vals[Math.floor(vals.length * 0.05)], hi = vals[Math.floor(vals.length * 0.95)];
-    return hi > lo ? [lo, hi] : [vals[0], vals[vals.length - 1]];
-  };
-
-  /*
-   * The route as SVG. `xy` holds the screen position of every point.
-   *
-   * A flat style is one cheap <polyline> per layer. A coloured one needs its
-   * own stroke per step, so those layers become a run of two-point paths; the
-   * round line caps make them join up seamlessly.
-   */
-  SlippyMap.prototype.routeSVG = function (xy) {
-    var self = this, style = this.style, out = '';
-    var vals = style.metric ? this.metrics[style.metric] : null;
-    var range = vals ? this.span() : null;
-    var flat = 'M' + xy.join('L');
-    style.layers.forEach(function (lay) {
-      var stroke = lay.casing ? 'var(--routecase)' : lay.color;
-      var op = lay.op == null ? '' : ' stroke-opacity="' + lay.op + '"';
-      if (!lay.metric || !vals || !range) {
-        out += '<path class="rline" d="' + flat + '" stroke="' +
-          (stroke || '#e8462a') + '" stroke-width="' + lay.w + '"' + op + '/>';
-        return;
-      }
-      for (var i = 1; i < xy.length; i++) {
-        var c = metricColor(style.id, vals[i], range[0], range[1], self.maxhr);
-        if (!c) continue;
-        out += '<path class="rline" d="M' + xy[i - 1] + 'L' + xy[i] + '" stroke="' + c +
-          '" stroke-width="' + lay.w + '"/>';
-      }
-    });
-    return out + '<circle class="startdot" r="5" cx="' + xy[0].split(',')[0] +
-      '" cy="' + xy[0].split(',')[1] + '"/>';
-  };
-
-  // The key under the map: what the colours actually mean.
-  SlippyMap.prototype.drawLegend = function () {
-    var style = this.style, vals = style.metric ? this.metrics[style.metric] : null;
-    var range = vals ? this.span() : null;
-    if (!style.metric || !range) { this.legend.hidden = true; return; }
-    this.legend.hidden = false;
-    var lo = range[0], hi = range[1], fill, text;
-    if (style.id === 'hr') {
-      // The zones are steps, not a fade, so the bar gets hard edges.
-      fill = 'linear-gradient(to right,' + ['easy', 'moderate', 'threshold', 'hard']
-        .map(function (k, i) {
-          return ZONE_INK[k] + ' ' + (i * 25) + '% ' + ((i + 1) * 25) + '%';
-        }).join(',') + ')';
-      text = ['Easy', 'Hard'];
-    } else {
-      var stops = style.id === 'elev' ? ELEV_RAMP : PACE_RAMP;
-      fill = 'linear-gradient(to right,' + stops.join(',') + ')';
-      text = style.id === 'pace' ? [pace(100000 / lo), pace(100000 / hi)]
-                                 : [Math.round(lo) + ' m', Math.round(hi) + ' m'];
-    }
-    this.legend.innerHTML = '<b>' + text[0] + '</b><i style="background:' + fill +
-      '"></i><b>' + text[1] + '</b>';
-  };
-
-  SlippyMap.prototype.setStyle = function (id) {
-    this.style = styleById(id);
-    try { localStorage.setItem('pref-route', id); } catch (e) {}
-    savedStyle = id;
-    this.menu.hidden = true;
-    this.render();
-  };
-
-  SlippyMap.prototype.size = function () {
-    return [this.el.clientWidth || 320, this.el.clientHeight || 200];
-  };
-
-  SlippyMap.prototype.fit = function () {
-    var s = this.size(), w = s[0], h = s[1], pad = 26, z, i, p, xs, ys;
-    if (!this.pts.length) { this.render(); return; }
-    for (z = this.layer.max; z > 2; z--) {
-      xs = []; ys = [];
-      for (i = 0; i < this.pts.length; i++) {
-        p = project(this.pts[i][0], this.pts[i][1], z); xs.push(p[0]); ys.push(p[1]);
-      }
-      if ((Math.max.apply(null, xs) - Math.min.apply(null, xs)) * 256 <= w - 2 * pad &&
-          (Math.max.apply(null, ys) - Math.min.apply(null, ys)) * 256 <= h - 2 * pad) break;
-    }
-    this.z = z;
-    this.cx = (Math.min.apply(null, xs) + Math.max.apply(null, xs)) / 2 * 256;
-    this.cy = (Math.min.apply(null, ys) + Math.max.apply(null, ys)) / 2 * 256;
-    this.render();
-  };
-
-  SlippyMap.prototype.tileUrl = function (x, y, z) {
-    var n = Math.pow(2, z), wx = ((x % n) + n) % n;
-    var url = (this.layer.darkUrl && isDark()) ? this.layer.darkUrl : this.layer.url;
-    return url.replace('{z}', z).replace('{x}', wx).replace('{y}', y)
-      .replace('{s}', this.layer.subs ? this.layer.subs[(wx + y) % this.layer.subs.length] : 'a');
-  };
-
-  SlippyMap.prototype.render = function () {
-    var s = this.size(), w = s[0], h = s[1];
-    var left = this.cx - w / 2, top = this.cy - h / 2;
-    // Tiles come from one zoom deeper on a sharp screen, drawn at half size.
-    var tz = Math.min(this.z + FINER, this.layer.max + FINER), n = Math.pow(2, tz);
-    var scale = Math.pow(2, tz - this.z);       // world pixels per css pixel
-    var tileCss = 256 / scale;
-    var x0 = Math.floor(left * scale / 256), x1 = Math.floor((left + w) * scale / 256);
-    var y0 = Math.floor(top * scale / 256), y1 = Math.floor((top + h) * scale / 256);
-    var html = '', x, y;
-    for (x = x0; x <= x1; x++) {
-      for (y = Math.max(y0, 0); y <= Math.min(y1, n - 1); y++) {
-        html += '<img class="maptile" alt="" onerror="this.style.visibility=\'hidden\'" src="' +
-          this.tileUrl(x, y, tz) + '" style="width:' + tileCss + 'px;height:' + tileCss +
-          'px;left:' + (x * tileCss - left).toFixed(2) + 'px;top:' +
-          (y * tileCss - top).toFixed(2) + 'px">';
-      }
-    }
-    this.tiles.innerHTML = html;
-    this.inner.style.transform = '';
-    this.attrib.textContent = this.layer.attrib;
-    this.svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-    var xy = [], p;
-    for (var i = 0; i < this.pts.length; i++) {
-      p = project(this.pts[i][0], this.pts[i][1], this.z);
-      xy.push((p[0] * 256 - left).toFixed(1) + ',' + (p[1] * 256 - top).toFixed(1));
-    }
-    this.svg.innerHTML = xy.length ? this.routeSVG(xy) : '';
-    var ctl = this.el.querySelectorAll('.mapctl button');
-    for (var c = 0; c < ctl.length; c++) {
-      ctl[c].classList.toggle('on', ctl[c].dataset.layer === this.layer.id);
-    }
-    // A style whose stream this run never recorded would draw a flat line with
-    // a misleading name, so offer only the ones there is data for.
-    var self = this;
-    var opts = this.el.querySelectorAll('.stylemenu button');
-    for (var s = 0; s < opts.length; s++) {
-      var st = styleById(opts[s].dataset.style);
-      opts[s].hidden = !!(st.metric && !self.metrics[st.metric]);
-      opts[s].classList.toggle('on', st.id === this.style.id);
-    }
-    this.el.querySelector('.stylename').textContent = this.style.name;
-    this.el.querySelector('.stylebtn .stylewatch').style.background = this.style.ink;
-    this.drawLegend();
-  };
-
-  // Zoom by a whole step, keeping whatever is under (ax, ay) where it is.
-  SlippyMap.prototype.zoomBy = function (step, ax, ay) {
-    this.zoomTo(this.z + step, ax, ay);
-  };
-
-  SlippyMap.prototype.zoomTo = function (z, ax, ay) {
-    var s = this.size();
-    z = Math.max(3, Math.min(this.layer.max, Math.round(z)));
-    if (z === this.z) { this.render(); return; }
-    ax = ax == null ? s[0] / 2 : ax; ay = ay == null ? s[1] / 2 : ay;
-    var wx = this.cx - s[0] / 2 + ax, wy = this.cy - s[1] / 2 + ay;
-    var k = Math.pow(2, z - this.z);
-    this.cx = wx * k - (ax - s[0] / 2); this.cy = wy * k - (ay - s[1] / 2);
-    this.z = z;
-    this.render();
-  };
-
-  SlippyMap.prototype.setLayer = function (id) {
-    this.layer = layerById(id);
-    try { localStorage.setItem('dash-layer', id); } catch (e) {}
-    savedLayer = id;
-    if (this.z > this.layer.max) this.zoomTo(this.layer.max);
-    else this.render();
-  };
-
-  SlippyMap.prototype.bind = function (opts) {
-    var self = this, el = this.el, drag = null, pinch = null;
-
-    el.addEventListener('pointerdown', function (e) {
-      if (e.target.closest('button') || pinch) return;
-      drag = { x: e.clientX, y: e.clientY };
-      el.setPointerCapture(e.pointerId);
-      el.classList.add('grabbing');
-    });
-    el.addEventListener('pointermove', function (e) {
-      if (!drag || pinch) return;
-      self.cx -= e.clientX - drag.x;
-      self.cy -= e.clientY - drag.y;
-      drag.x = e.clientX; drag.y = e.clientY;
-      self.render();
-    });
-    function endDrag(e) {
-      if (!drag) return;
-      drag = null;
-      el.classList.remove('grabbing');
-      try { el.releasePointerCapture(e.pointerId); } catch (err) {}
-    }
-    el.addEventListener('pointerup', endDrag);
-    el.addEventListener('pointercancel', endDrag);
-
-    el.addEventListener('wheel', function (e) {
-      e.preventDefault();
-      var r = el.getBoundingClientRect();
-      self.zoomBy(e.deltaY < 0 ? 1 : -1, e.clientX - r.left, e.clientY - r.top);
-    }, { passive: false });
-    el.addEventListener('dblclick', function (e) {
-      var r = el.getBoundingClientRect();
-      self.zoomBy(1, e.clientX - r.left, e.clientY - r.top);
-    });
-
-    /*
-     * Pinch. While two fingers are down the whole layer - tiles and route
-     * together - is scaled and shifted with a CSS transform, which the phone
-     * does on every frame. Nothing is redrawn until the fingers lift, and then
-     * the map settles on the nearest whole zoom level and the tiles come back
-     * sharp.
-     */
-    function centreOf(e, rect) {
-      return [(e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left,
-              (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top];
-    }
-    function spread(e) {
-      return Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                        e.touches[0].clientY - e.touches[1].clientY);
-    }
-    el.addEventListener('touchstart', function (e) {
-      if (e.touches.length !== 2) return;
-      drag = null;
-      var rect = el.getBoundingClientRect(), at = centreOf(e, rect);
-      pinch = { d: spread(e), x: at[0], y: at[1], k: 1, dx: 0, dy: 0 };
-      self.inner.style.transformOrigin = at[0] + 'px ' + at[1] + 'px';
-    }, { passive: true });
-    el.addEventListener('touchmove', function (e) {
-      if (!pinch || e.touches.length !== 2) return;
-      e.preventDefault();
-      var rect = el.getBoundingClientRect(), at = centreOf(e, rect);
-      pinch.k = spread(e) / pinch.d;
-      pinch.dx = at[0] - pinch.x;
-      pinch.dy = at[1] - pinch.y;
-      self.inner.style.transform =
-        'translate(' + pinch.dx.toFixed(1) + 'px,' + pinch.dy.toFixed(1) + 'px) scale(' +
-        pinch.k.toFixed(4) + ')';
-    }, { passive: false });
-    function endPinch() {
-      if (!pinch) return;
-      var k = pinch.k || 1, ax = pinch.x, ay = pinch.y, dx = pinch.dx, dy = pinch.dy;
-      pinch = null;
-      self.inner.style.transform = '';
-      var s = self.size();
-      // undo the drag part of the gesture, then settle on a whole zoom level
-      self.cx -= dx; self.cy -= dy;
-      var target = Math.max(3, Math.min(self.layer.max, Math.round(self.z + Math.log(k) / Math.LN2)));
-      if (target === self.z) { self.render(); return; }
-      var wx = self.cx - s[0] / 2 + ax, wy = self.cy - s[1] / 2 + ay;
-      var f = Math.pow(2, target - self.z);
-      self.cx = wx * f - (ax - s[0] / 2); self.cy = wy * f - (ay - s[1] / 2);
-      self.z = target;
-      self.render();
-    }
-    el.addEventListener('touchend', endPinch);
-    el.addEventListener('touchcancel', endPinch);
-
-    el.addEventListener('click', function (e) {
-      var b = e.target.closest('button');
-      if (!b) { self.menu.hidden = true; return; }
-      e.preventDefault();
-      if (b.dataset.layer) self.setLayer(b.dataset.layer);
-      else if (b.dataset.zoom) self.zoomBy(+b.dataset.zoom);
-      else if (b.dataset.style) self.setStyle(b.dataset.style);
-      else if (b.classList.contains('stylebtn')) self.menu.hidden = !self.menu.hidden;
-      else if (b.classList.contains('mapbig') && opts.expand) opts.expand();
-    });
-  };
-
-  // ---------- charts ----------
-  var W = 760;
-  function smooth(values) {
-    return values.map(function (v, i) {
-      if (v == null) return null;
-      var a = values[i - 1] == null ? v : values[i - 1], b = values[i + 1] == null ? v : values[i + 1];
-      return (a + v + b) / 3;
-    });
-  }
-  function percentile(values, p) {
-    var v = values.filter(function (x) { return x != null; }).sort(function (a, b) { return a - b; });
-    if (!v.length) return null;
-    return v[Math.min(v.length - 1, Math.max(0, Math.round((v.length - 1) * p)))];
-  }
-
-  /*
-   * One chart. `invert` puts small values at the top, which is what pace wants:
-   * a peak then means fast and a valley means slow, the way it reads on a watch.
-   */
-  function chart(ys, opts) {
-    var H = opts.height, top = 10, bottom = 18, left = 66;
-    var plotH = H - top - bottom, plotW = W - left - 8;
-    var clean = ys.filter(function (v) { return v != null; });
-    if (clean.length < 2) return '';
-    var lo = opts.lo != null ? opts.lo : Math.min.apply(null, clean);
-    var hi = opts.hi != null ? opts.hi : Math.max.apply(null, clean);
-    if (hi - lo < 1e-6) hi = lo + 1;
-    var span = (hi - lo) * 1.12, mid = (hi + lo) / 2;
-    lo = mid - span / 2; hi = mid + span / 2;
-    var x = function (i) { return left + plotW * i / Math.max(ys.length - 1, 1); };
-    var y = function (v) {
-      var f = (v - lo) / (hi - lo);
-      return opts.invert ? top + f * plotH : top + plotH - f * plotH;
-    };
-    var out = [];
-    (opts.bands || []).forEach(function (b) {
-      var a = y(Math.min(b.hi, hi)), c = y(Math.max(b.lo, lo));
-      var y0 = Math.min(a, c), y1 = Math.max(a, c);
-      if (y1 - y0 > 1) out.push('<rect x="' + left + '" y="' + y0.toFixed(1) + '" width="' + plotW +
-        '" height="' + (y1 - y0).toFixed(1) + '" class="band ' + b.cls + '"/>');
-    });
-    for (var t = 0; t < 3; t++) {
-      var v = lo + (hi - lo) * (t + 0.5) / 3;
-      out.push('<line x1="' + left + '" x2="' + (W - 8) + '" y1="' + y(v).toFixed(1) + '" y2="' +
-        y(v).toFixed(1) + '" class="grid"/><text x="' + (left - 6) + '" y="' + (y(v) + 4).toFixed(1) +
-        '" class="tick" text-anchor="end">' + opts.fmt(v) + '</text>');
-    }
-    var d = '', started = false;
-    for (var i = 0; i < ys.length; i++) {
-      if (ys[i] == null) { started = false; continue; }
-      var val = Math.max(lo, Math.min(hi, ys[i]));
-      d += (started ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(val).toFixed(1) + ' ';
-      started = true;
-    }
-    if (opts.area) {
-      out.push('<path d="' + d + 'L' + x(ys.length - 1).toFixed(1) + ' ' + (top + plotH) + ' L' +
-        x(0).toFixed(1) + ' ' + (top + plotH) + ' Z" class="areafill ' + (opts.cls || '') + '"/>');
-    }
-    out.push('<path d="' + d + '" class="cline ' + (opts.cls || '') + '"/>');
-    out.push('<line class="cursor" x1="0" x2="0" y1="' + top + '" y2="' + (top + plotH) + '"/>');
-    return '<div class="chartbox" data-kind="' + (opts.kind || '') + '">' +
-      '<span class="clabel">' + opts.label + (opts.hint ? ' <i>' + opts.hint + '</i>' : '') + '</span>' +
-      '<svg viewBox="0 0 ' + W + ' ' + H + '" class="cchart" data-left="' + left +
-      '" data-right="' + (left + plotW) + '" role="img" aria-label="' + opts.label + '">' +
-      out.join('') + '</svg></div>';
-  }
-
-  // The three series of a run, optionally only the slice [i0, i1) of it.
-  function seriesFor(run, i0, i1) {
-    var slice = function (a) { return (a || []).slice(i0, i1); };
-    var pc = slice(run.sp).map(function (v) { return v && v > 40 ? 100000 / v : null; });
-    return { hr: slice(run.hs), pace: smooth(pc), alt: slice(run.al), dist: slice(run.d), time: slice(run.t) };
-  }
-
-  function chartsHTML(run, i0, i1, big) {
-    var s = seriesFor(run, i0, i1);
-    var bands = conf.zones.map(function (z) {
-      return { lo: conf.maxhr * z[2] / 100, hi: conf.maxhr * z[3] / 100, cls: 'z' + z[0] };
-    });
-    var html = chart(s.hr, {
-      height: big ? 260 : 150, label: 'Heart rate (bpm)', cls: 'hr', kind: 'hr',
-      bands: bands, fmt: function (v) { return Math.round(v); }
-    });
-    if (s.pace.filter(function (v) { return v; }).length > 5) {
-      html += chart(s.pace, {
-        height: big ? 220 : 120, label: 'Pace (min/km)', hint: 'higher = faster', cls: 'pace',
-        kind: 'pace', fmt: pace, invert: true,
-        lo: percentile(s.pace, 0.02), hi: percentile(s.pace, 0.96)
-      });
-    }
-    if (s.alt.length) {
-      html += chart(s.alt, {
-        height: big ? 170 : 90, label: 'Elevation (m)', cls: 'elev', kind: 'elev', area: true,
-        fmt: function (v) { return Math.round(v) + ' m'; }
-      });
-    }
-    return html;
-  }
-
-  /*
-   * The moving readout shared by every chart in a box.
-   *
-   * Attached ONCE per box. The charts inside are rebuilt on every zoom step, so
-   * the SVG elements are looked up at the moment a finger moves and never
-   * cached - a cached list would point at charts already thrown away, and
-   * re-attaching on each redraw would pile up a fresh set of listeners.
-   *
-   * `surface` is the element that hears the events. In the pop-out that is a
-   * transparent sheet which is never rebuilt, so a pinch is not cut short when
-   * the chart under the fingers is replaced mid-gesture.
-   */
-  function attachProbe(surface, box, readout, run) {
-    function at(clientX) {
-      var charts = box.querySelectorAll('.cchart');
-      if (!charts.length) return;
-      var n = +box.dataset.count, i0 = +box.dataset.from || 0;
-      var first = charts[0], rect = first.getBoundingClientRect();
-      var left = +first.dataset.left, right = +first.dataset.right;
-      var f = (clientX - rect.left) / rect.width * W;
-      f = (f - left) / (right - left);
-      var i = Math.max(0, Math.min(n - 1, Math.round(f * (n - 1))));
-      for (var c = 0; c < charts.length; c++) {
-        var cur = charts[c].querySelector('.cursor');
-        var px = left + (right - left) * i / Math.max(n - 1, 1);
-        cur.setAttribute('x1', px); cur.setAttribute('x2', px);
-        cur.style.opacity = 1;
-      }
-      var j = i0 + i;
-      var bits = [run.d && run.d[j] != null ? (run.d[j] / 1000).toFixed(2) + ' km' : null,
-        run.hs && run.hs[j] ? run.hs[j] + ' bpm' : null,
-        run.sp && run.sp[j] > 40 ? pace(100000 / run.sp[j]) + ' /km' : null,
-        run.t && run.t[j] != null ? hms(run.t[j]) : null,
-        run.al && run.al[j] != null ? Math.round(run.al[j]) + ' m' : null];
-      readout.textContent = bits.filter(Boolean).join('  ·  ');
-    }
-    function clear() {
-      readout.textContent = readout.dataset.idle;
-      var charts = box.querySelectorAll('.cchart');
-      for (var c = 0; c < charts.length; c++) charts[c].querySelector('.cursor').style.opacity = 0;
-    }
-    surface.addEventListener('mousemove', function (e) { at(e.clientX); });
-    surface.addEventListener('mouseleave', clear);
-    // One finger reads the charts. Two fingers are a pinch, and the readout has
-    // to keep its hands off it.
-    surface.addEventListener('touchstart', function (e) {
-      if (e.touches.length === 1) at(e.touches[0].clientX); else clear();
-    }, { passive: true });
-    surface.addEventListener('touchmove', function (e) {
-      if (e.touches.length === 1) at(e.touches[0].clientX);
-    }, { passive: true });
-  }
-
-  // ---------- pop-out ----------
-  function openSheet(title, bodyHTML, onMount) {
-    var back = document.createElement('div');
-    back.className = 'sheet';
-    back.innerHTML = '<div class="sheetbox" role="dialog" aria-modal="true" aria-label="' + title + '">' +
-      '<div class="sheethead"><b>' + title + '</b>' +
-      '<button type="button" class="sheetclose" aria-label="Close">✕</button></div>' +
-      '<div class="sheetbody"></div></div>';
-    back.querySelector('.sheetbody').innerHTML = bodyHTML;
-    document.body.appendChild(back);
-    document.body.classList.add('noscroll');
-    function close() {
-      back.remove();
-      document.body.classList.remove('noscroll');
-      document.removeEventListener('keydown', onKey);
-    }
-    function onKey(e) { if (e.key === 'Escape') close(); }
-    document.addEventListener('keydown', onKey);
-    back.addEventListener('click', function (e) {
-      if (e.target === back || e.target.closest('.sheetclose')) close();
-    });
-    if (onMount) onMount(back.querySelector('.sheetbody'), close);
-    return close;
-  }
-
-  // Charts blown up, with a zoom window over the run you can widen or narrow.
-  function openCharts(run) {
-    var n = (run.hs || []).length;
-    if (!n) return;
-    var view = { i0: 0, i1: n };
-    openSheet(esc(run.n), '<div class="zoombar">' +
-      '<button type="button" data-act="in">Zoom in</button>' +
-      '<button type="button" data-act="out">Zoom out</button>' +
-      '<button type="button" data-act="left">◀</button>' +
-      '<button type="button" data-act="right">▶</button>' +
-      '<button type="button" data-act="reset">Whole run</button></div>' +
-      '<p class="hint" id="zoomrange"></p>' +
-      '<p class="readout" id="zoomout"></p>' +
-      '<div class="charts zoomwrap" id="zoomcharts"><div class="chartsin"></div>' +
-      '<div class="chartgrab"></div></div>',
-    function (body) {
-      var box = body.querySelector('#zoomcharts'), out = body.querySelector('#zoomout');
-      // The charts are redrawn inside `pane`; `grab` lies on top and is never
-      // rebuilt, so it keeps hearing the fingers all through a pinch.
-      var pane = box.querySelector('.chartsin'), grab = box.querySelector('.chartgrab');
-      out.dataset.idle = 'Move across the charts to read any point.';
-      function draw() {
-        var from = Math.max(0, Math.round(view.i0));
-        var to = Math.min(n, Math.round(view.i1));
-        if (to - from < 8) to = Math.min(n, from + 8);
-        pane.innerHTML = chartsHTML(run, from, to, true);
-        box.dataset.count = to - from;
-        box.dataset.from = from;
-        var kmA = run.d && run.d[from] != null ? (run.d[from] / 1000).toFixed(2) : '0';
-        var kmB = run.d && run.d[to - 1] != null ? (run.d[to - 1] / 1000).toFixed(2) : '?';
-        body.querySelector('#zoomrange').textContent =
-          'Showing ' + kmA + ' km to ' + kmB + ' km of the run.';
-      }
-      attachProbe(grab, box, out, run);
-      out.textContent = out.dataset.idle;
-      function zoom(k) {                       // k < 1 zooms in, around the middle
-        var mid = (view.i0 + view.i1) / 2, half = (view.i1 - view.i0) * k / 2;
-        view.i0 = Math.max(0, mid - half); view.i1 = Math.min(n, mid + half);
-        draw();
-      }
-      function pan(dir) {
-        var span = view.i1 - view.i0, step = span * 0.35 * dir;
-        if (view.i0 + step < 0) step = -view.i0;
-        if (view.i1 + step > n) step = n - view.i1;
-        view.i0 += step; view.i1 += step;
-        draw();
-      }
-      body.addEventListener('click', function (e) {
-        var b = e.target.closest('button[data-act]');
-        if (!b) return;
-        var a = b.dataset.act;
-        if (a === 'in') zoom(0.5);
-        else if (a === 'out') zoom(2);
-        else if (a === 'left') pan(-1);
-        else if (a === 'right') pan(1);
-        else { view.i0 = 0; view.i1 = n; draw(); }
-      });
-      /*
-       * Pinch and two-finger drag on the charts. The window follows the fingers
-       * continuously - spread them a little and it widens a little - instead of
-       * jumping a whole step at a time. Redraws are tied to the screen's own
-       * refresh so it stays smooth.
-       */
-      var pinch = null, queued = false;
-      function schedule() {
-        if (queued) return;
-        queued = true;
-        requestAnimationFrame(function () { queued = false; draw(); });
-      }
-      function fingers(e) {
-        return {
-          d: Math.max(20, Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
-                                     e.touches[0].clientY - e.touches[1].clientY)),
-          x: (e.touches[0].clientX + e.touches[1].clientX) / 2
-        };
-      }
-      grab.addEventListener('touchstart', function (e) {
-        if (e.touches.length !== 2) return;
-        var f = fingers(e);
-        var rect = grab.getBoundingClientRect();
-        pinch = { d: f.d, x: f.x, i0: view.i0, i1: view.i1,
-                  anchor: Math.min(1, Math.max(0, (f.x - rect.left) / rect.width)) };
-      }, { passive: true });
-      grab.addEventListener('touchmove', function (e) {
-        if (!pinch || e.touches.length !== 2) return;
-        e.preventDefault();
-        var f = fingers(e), rect = grab.getBoundingClientRect();
-        var span = pinch.i1 - pinch.i0;
-        var fresh = Math.max(8, Math.min(n, span / (f.d / pinch.d)));
-        // keep whatever sits under the middle of the fingers in place
-        var at = pinch.i0 + span * pinch.anchor;
-        var start = at - fresh * pinch.anchor - (f.x - pinch.x) / rect.width * fresh;
-        view.i0 = Math.max(0, Math.min(n - fresh, start));
-        view.i1 = view.i0 + fresh;
-        schedule();
-      }, { passive: false });
-      function stopPinch() { pinch = null; }
-      grab.addEventListener('touchend', stopPinch);
-      grab.addEventListener('touchcancel', stopPinch);
-      draw();
-    });
-  }
-  /* ----------------------------------------------------------------
-   * Notes
-   *
-   * A note lives in notes.enc in the repo, encrypted with the dashboard
-   * password - the repo is public, so nothing personal may sit there in the
-   * clear. The browser already knows the password (it just decrypted this
-   * page), so it can read and write that file itself.
-   *
-   * Reading needs nothing: notes.enc is public, just unreadable without the
-   * password. Writing needs a GitHub token, which is pasted once per device
-   * and kept in this browser only.
-   * ---------------------------------------------------------------- */
-  var NOTES = window.NOTES || {};
-  var shas = {}, pulled = false;
-
-  var store = {
-    token: function (v) {
-      try {
-        if (v === undefined) return localStorage.getItem('gh-token') || '';
-        if (v) localStorage.setItem('gh-token', v); else localStorage.removeItem('gh-token');
-      } catch (e) {}
-      return v || '';
-    },
-    local: function (v) {
-      try {
-        if (v === undefined) return JSON.parse(localStorage.getItem('dash-notes') || '{}');
-        localStorage.setItem('dash-notes', JSON.stringify(v));
-      } catch (e) { return {}; }
-    },
-    password: function () {
-      try { return sessionStorage.getItem('dash-pw') || localStorage.getItem('dash-pw') || ''; }
-      catch (e) { return ''; }
-    }
-  };
-
-  function mergeNotes(into, from) {            // newest wins, per run
-    Object.keys(from || {}).forEach(function (k) {
-      if (!into[k] || (from[k].updated || '') > (into[k].updated || '')) into[k] = from[k];
-    });
-    return into;
-  }
-  mergeNotes(NOTES, store.local());
-
-  var b64 = {
-    enc: function (bytes) {
-      var s = '';
-      for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-      return btoa(s);
-    },
-    dec: function (str) { return Uint8Array.from(atob(str), function (c) { return c.charCodeAt(0); }); }
-  };
-  var ROUNDS = 250000;
-
-  async function keyFor(password, salt, rounds) {
-    var base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password),
-      'PBKDF2', false, ['deriveKey']);
-    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt, iterations: rounds, hash: 'SHA-256' },
-      base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-  }
-  async function encryptNotes(obj, password) {
-    var salt = crypto.getRandomValues(new Uint8Array(16));
-    var iv = crypto.getRandomValues(new Uint8Array(12));
-    var key = await keyFor(password, salt, ROUNDS);
-    var data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key,
-      new TextEncoder().encode(JSON.stringify(obj)));
-    return JSON.stringify({ salt: b64.enc(salt), iv: b64.enc(iv),
-      data: b64.enc(new Uint8Array(data)), rounds: ROUNDS });
-  }
-  async function decryptNotes(text, password) {
-    var blob = JSON.parse(text);
-    var key = await keyFor(password, b64.dec(blob.salt), blob.rounds);
-    var plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.dec(blob.iv) }, key,
-      b64.dec(blob.data));
-    return JSON.parse(new TextDecoder().decode(plain));
-  }
-
-  // Pull the newest notes file straight from the repo - no token needed, so a
-  // note written on the phone shows up on the PC without waiting for a rebuild.
-  async function pullNotes() {
-    if (pulled || !conf.repo) return;
-    pulled = true;
-    var pw = store.password();
-    if (!pw) return;
-    try {
-      var r = await fetch('https://raw.githubusercontent.com/' + conf.repo + '/main/notes.enc',
-        { cache: 'no-store' });
-      if (!r.ok) return;
-      mergeNotes(NOTES, await decryptNotes(await r.text(), pw));
-    } catch (e) { /* offline, no file yet, or a different password - not fatal */ }
-  }
-
-  // Write one encrypted file into the repo. Notes and settings both use this.
-  async function putEncrypted(path, obj, message) {
-    var token = store.token(), pw = store.password();
-    if (!token) return { ok: false, why: 'no-token' };
-    if (!pw) return { ok: false, why: 'no-password' };
-    if (!conf.repo) return { ok: false, why: 'no-repo' };
-    var api = 'https://api.github.com/repos/' + conf.repo + '/contents/' + path;
-    var head = { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' };
-    try {
-      if (shas[path] === undefined) {          // find the file's current version first
-        var get = await fetch(api + '?ref=main', { headers: head, cache: 'no-store' });
-        if (get.ok) shas[path] = (await get.json()).sha;
-        else if (get.status === 404) shas[path] = '';
-        else return { ok: false, why: get.status === 401 || get.status === 403 ? 'bad-token' : 'http' };
-      }
-      var body = { message: message, content: btoa(unescape(encodeURIComponent(
-        await encryptNotes(obj, pw)))), branch: 'main' };
-      if (shas[path]) body.sha = shas[path];
-      var put = await fetch(api, { method: 'PUT', headers: head, body: JSON.stringify(body) });
-      if (put.status === 409 || put.status === 422) {
-        delete shas[path];
-        return { ok: false, why: 'conflict' };
-      }
-      if (!put.ok) return { ok: false, why: put.status === 401 || put.status === 403 ? 'bad-token' : 'http' };
-      shas[path] = (await put.json()).content.sha;
-      return { ok: true };
-    } catch (e) {
-      return { ok: false, why: 'offline' };
-    }
-  }
-
-  function pushNotes() { return putEncrypted('notes.enc', NOTES, 'Save run notes'); }
-
-  var WHY = {
-    'no-token': 'Saved on this device. Add a GitHub token below to sync it to your other devices.',
-    'no-password': 'Saved on this device only - reopen the dashboard with your password to sync.',
-    'no-repo': 'Saved on this device only - this build does not know which repo to write to.',
-    'bad-token': 'Saved on this device. GitHub refused the token - check it has Contents: read and write.',
-    'conflict': 'Saved on this device. The notes file changed elsewhere - press Save again.',
-    'offline': 'Saved on this device. No connection to GitHub right now - press Save again later.',
-    'http': 'Saved on this device. GitHub would not accept the change.'
-  };
-
-  function notesBlock(run) {
-    var note = NOTES[run.id] || {};
-    var tail = store.token() ? ''
-      : '<p class="hint">Notes save on this device straight away. To have them appear on your ' +
-        'other devices too, add a GitHub token in <a href="#/settings">Settings</a>.</p>';
-    return '<section class="card" id="notecard"><h2>Your notes</h2>' +
-      '<textarea id="notetext" rows="4" placeholder="How did it feel? Legs, weather, anything worth ' +
-      'remembering next time.">' + esc(note.text || '') + '</textarea>' +
-      '<div class="noterow"><button type="button" id="notesave">Save</button>' +
-      '<span id="notestatus" class="hint">' +
-      (note.updated ? 'Last saved ' + esc(note.updated.slice(0, 16).replace('T', ' ')) : '') +
-      '</span></div>' + tail + '</section>';
-  }
-
-  function wireNotes(run) {
-    var text = document.getElementById('notetext');
-    var status = document.getElementById('notestatus');
-    var saveBtn = document.getElementById('notesave');
-    if (!text) return;
-    saveBtn.addEventListener('click', async function () {
-      saveBtn.disabled = true;
-      status.textContent = 'Saving…';
-      var body = text.value.trim();
-      if (body) NOTES[run.id] = { text: body, updated: new Date().toISOString() };
-      else delete NOTES[run.id];
-      store.local(NOTES);                       // never lose it, whatever GitHub says
-      var res = await pushNotes();
-      status.textContent = res.ok ? 'Saved and synced.' : WHY[res.why] || 'Saved on this device.';
-      saveBtn.disabled = false;
-    });
-  }
-  /* ----------------------------------------------------------------
-   * Settings
-   *
-   * Appearance and map style are per device: they live in this browser and
-   * change the moment you tap them. The training settings change how the
-   * dashboard is built, so they go to settings.enc in the repo the same way
-   * notes do, and take effect on the next build.
-   * ---------------------------------------------------------------- */
-  var prefs = {
-    get: function (k, fallback) {
-      try { return localStorage.getItem('pref-' + k) || fallback; } catch (e) { return fallback; }
-    },
-    set: function (k, v) { try { localStorage.setItem('pref-' + k, v); } catch (e) {} }
-  };
-
-  function applyTheme(choice) {
-    var root = document.documentElement;
-    if (choice === 'light' || choice === 'dark') root.setAttribute('data-theme', choice);
-    else root.removeAttribute('data-theme');
-    var dark = choice === 'dark' ||
-      (choice !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', dark ? '#0d0d0d' : '#f9f9f7');
-  }
-  applyTheme(prefs.get('theme', 'system'));
-
-  function markChosen(group, attr, value) {
-    var buttons = document.querySelectorAll('#' + group + ' button');
-    for (var i = 0; i < buttons.length; i++) {
-      buttons[i].classList.toggle('on', buttons[i].dataset[attr] === value);
-    }
-  }
-
-  function wireSettings() {
-    var themes = document.getElementById('themechoice');
-    if (!themes) return;
-    markChosen('themechoice', 'theme', prefs.get('theme', 'system'));
-    themes.addEventListener('click', function (e) {
-      var b = e.target.closest('button');
-      if (!b) return;
-      prefs.set('theme', b.dataset.theme);
-      applyTheme(b.dataset.theme);
-      markChosen('themechoice', 'theme', b.dataset.theme);
-    });
-
-    markChosen('mapchoice', 'map', prefs.get('map', 'plain'));
-    document.getElementById('mapchoice').addEventListener('click', function (e) {
-      var b = e.target.closest('button');
-      if (!b) return;
-      prefs.set('map', b.dataset.map);
-      markChosen('mapchoice', 'map', b.dataset.map);
-    });
-
-    // training settings start from what this build was made with
-    var days = conf.planDays || {};
-    ['threshold', 'easy', 'long'].forEach(function (k) {
-      var sel = document.getElementById('setday-' + k);
-      if (sel) sel.value = String(days[k]);
-    });
-
-    var status = document.getElementById('trainingstatus');
-    document.getElementById('savetraining').addEventListener('click', async function () {
-      var btn = this;
-      btn.disabled = true;
-      status.textContent = 'Saving…';
-      var body = {
-        max_hr: parseInt(document.getElementById('setmaxhr').value, 10) || conf.maxhr,
-        plan_start: document.getElementById('setstart').value || conf.planStart,
-        plan_days: {
-          threshold: +document.getElementById('setday-threshold').value,
-          easy: +document.getElementById('setday-easy').value,
-          long: +document.getElementById('setday-long').value
-        },
-        updated: new Date().toISOString()
-      };
-      var res = await putEncrypted('settings.enc', body, 'Save training settings');
-      status.textContent = res.ok
-        ? 'Saved. The dashboard rebuilds with it in a few minutes.'
-        : (WHY[res.why] || 'Could not save.').replace('Saved on this device. ', '');
-      btn.disabled = false;
-    });
-
-    var tokenInput = document.getElementById('ghtoken');
-    document.getElementById('tokensave').addEventListener('click', async function () {
-      var value = tokenInput.value.trim();
-      store.token(value);
-      notesSha = null;
-      var out = document.getElementById('tokenstatus');
-      if (!value) { out.textContent = 'Token removed from this device.'; return; }
-      out.textContent = 'Checking…';
-      var res = await pushNotes();
-      out.textContent = res.ok ? 'Token works - your notes and settings now sync.'
-        : (WHY[res.why] || 'That did not work.').replace('Saved on this device. ', '');
-      tokenInput.value = '';
-    });
-    if (store.token()) document.getElementById('tokenstatus').textContent = 'A token is saved on this device.';
-
-    document.getElementById('checkupdate').addEventListener('click', function () {
-      var out = document.getElementById('updatestatus');
-      out.textContent = 'Checking…';
-      if (!('serviceWorker' in navigator)) { out.textContent = 'Not supported in this browser.'; return; }
-      navigator.serviceWorker.getRegistration().then(function (reg) {
-        if (!reg) { out.textContent = 'No app installed yet - add it to your home screen.'; return; }
-        return reg.update().then(function () {
-          setTimeout(function () {
-            out.textContent = document.getElementById('update').hidden
-              ? 'You are on the newest version.' : 'A new version is ready - see the bar below.';
-          }, 1500);
-        });
-      }).catch(function () { out.textContent = 'Could not check just now.'; });
-    });
-
-    document.getElementById('clearlocal').addEventListener('click', function () {
-      try {
-        ['dash-pw', 'dash-page', 'dash-notes', 'gh-token', 'dash-layer'].forEach(function (k) {
-          localStorage.removeItem(k);
-        });
-        sessionStorage.removeItem('dash-pw');
-      } catch (e) {}
-      location.reload();
-    });
-  }
-
-  // ---------- the run page ----------
-  function statGrid(run) {
-    var cells = [
-      [(run.m / 1000).toFixed(2), 'km'],
-      [hms(run.s), 'moving'],
-      [pace(run.s / (run.m / 1000)), '/km'],
-      [run.up + ' m', 'climb']
-    ];
-    if (run.hr) cells.push([run.hr, 'avg bpm']);
-    if (run.mhr) cells.push([run.mhr, 'max bpm']);
-    if (run.cad) cells.push([run.cad, 'steps/min']);
-    if (run.e && run.e > run.s + 30) cells.push([hms(run.e), 'elapsed']);
-    return '<div class="stats">' + cells.map(function (c) {
-      return '<div><span class="m">' + c[0] + '</span><span class="u">' + c[1] + '</span></div>';
-    }).join('') + '</div>';
-  }
-
-  function zoneBlock(run) {
-    var total = 0, keys = conf.order, i;
-    for (i = 0; i < keys.length; i++) total += run.zs[keys[i]] || 0;
-    if (!total) return '';
-    var bar = '', list = '';
-    for (i = 0; i < keys.length; i++) {
-      var v = run.zs[keys[i]] || 0;
-      if (!v) continue;
-      bar += '<div class="bar-seg ' + zoneColor(keys[i]) + '" style="width:' + (v / total * 100).toFixed(2) + '%"></div>';
-      list += '<div class="zrow"><span><i class="dot ' + zoneColor(keys[i]) + '"></i>' + conf.names[keys[i]] +
-        '</span><span class="num">' + hms(v) + ' · ' + Math.round(v / total * 100) + '%</span></div>';
-    }
-    return '<section class="card"><h2>Time in zones</h2><div class="bar">' + bar + '</div>' +
-      '<div class="zlist">' + list + '</div>' +
-      '<p class="hint">Measured second by second from the heart-rate strap, not from the run’s average.</p></section>';
-  }
-
-  function lapsBlock(run) {
-    if (!run.laps || run.laps.length < 2) return '';
-    var rows = run.laps.map(function (l) {
-      var p = l.m ? l.s / (l.m / 1000) : 0;
-      var hot = l.hr && zoneOf(l.hr) !== 'easy' && zoneOf(l.hr) !== 'moderate';
-      return '<tr' + (hot ? ' class="work"' : '') + '><td class="num">' + l.i + '</td>' +
-        '<td class="num">' + (l.m >= 1000 ? (l.m / 1000).toFixed(2) + ' km' : l.m + ' m') + '</td>' +
-        '<td class="num">' + hms(l.s) + '</td><td class="num">' + pace(p) + '</td>' +
-        '<td class="num">' + (l.hr || '-') + '</td><td class="num">' + (l.mhr || '-') + '</td></tr>';
-    }).join('');
-    return '<section class="card"><h2>Laps</h2><div class="scroll"><table>' +
-      '<tr><th>#</th><th>Distance</th><th>Time</th><th>Pace</th><th>Avg HR</th><th>Max HR</th></tr>' +
-      rows + '</table></div><p class="hint">Green rows reached threshold heart rate (' +
-      Math.round(conf.maxhr * 0.82) + '-' + (Math.round(conf.maxhr * 0.88) - 1) + ' bpm). A rep that stayed ' +
-      'under is not a failure - heart rate lags in the first minute, so short reps often finish just below.</p></section>';
-  }
-
-  function splitsBlock(run) {
-    if (!run.sl || !run.sl.length) return '';
-    var paces = run.sl.map(function (s) { return s.s; });
-    var fast = Math.min.apply(null, paces), slow = Math.max.apply(null, paces);
-    var rows = run.sl.map(function (s) {
-      var frac = slow === fast ? 1 : 0.25 + 0.75 * (slow - s.s) / (slow - fast);
-      var cls = s.hr ? zoneColor(zoneOf(s.hr)) : 's0';
-      return '<div class="split"><span class="km">' + s.km + '</span>' +
-        '<span class="sbar"><i class="' + cls + '" style="width:' + (frac * 100).toFixed(1) + '%"></i></span>' +
-        '<span class="sp">' + pace(s.s) + '</span><span class="sh">' + (s.hr || '-') + '</span></div>';
-    }).join('');
-    return '<section class="card"><h2>Kilometre splits</h2><div class="splits">' + rows +
-      '</div><p class="hint">Bar length is relative pace; colour is the heart-rate zone for that kilometre.</p></section>';
-  }
-
-  function chartsBlock(run) {
-    if (!run.hs || !run.hs.length) {
-      return '<section class="card"><h2>Heart rate</h2><p class="sub">No heart-rate detail stored for this ' +
-        'run yet. The hourly update fetches a few runs at a time.</p></section>';
-    }
-    return '<section class="card"><h2>During the run' +
-      '<button type="button" class="more" id="chartbig">Bigger ⤢</button></h2>' +
-      '<p class="readout" id="readout"></p>' +
-      '<div class="charts" id="charts" data-count="' + run.hs.length + '">' +
-      chartsHTML(run, 0, run.hs.length, false) + '</div>' +
-      '<p class="hint">Tap the charts to open them bigger, where you can zoom into a single interval.</p></section>';
-  }
-
-  var current = null, currentMap = null;
-
-  window.showRun = function (id) {
-    var run = byId[id];
-    current = run || null;
-    if (!run) {
-      host.innerHTML = '<section class="card"><p class="sub">That run is not in the last 140 days.</p></section>';
-      return;
-    }
-    document.title = 'Trening · ' + run.n;
-    host.innerHTML =
-      '<h1 class="runtitle">' + esc(run.n) + '</h1>' +
-      '<p class="sub">' + dateText(run.dt) + '</p>' +
-      '<section class="card nopad"><div class="mapwrap"></div>' + statGrid(run) + '</section>' +
-      chartsBlock(run) + lapsBlock(run) + splitsBlock(run) + zoneBlock(run) + notesBlock(run) +
-      '<p class="hint"><a href="https://www.strava.com/activities/' + run.id +
-      '" target="_blank" rel="noopener">Open this run on Strava ↗</a></p>';
-
-    var wrap = host.querySelector('.mapwrap');
-    var pts = run.poly ? decodePoly(run.poly) : [];
-    if (pts.length > 1) {
-      currentMap = new SlippyMap(wrap, pts,
-        { run: run, expand: function () { openBigMap(run, pts); } });
-    } else {
-      wrap.remove();
-    }
-
-    var box = document.getElementById('charts');
-    if (box) {
-      var out = document.getElementById('readout');
-      out.dataset.idle = 'Move across the chart to read any point.';
-      out.textContent = out.dataset.idle;
-      box.dataset.from = 0;
-      attachProbe(box, box, out, run);
-      var slid = 0, startX = 0;
-      box.addEventListener('touchstart', function (e) {
-        slid = 0; startX = e.touches[0].clientX;
-      }, { passive: true });
-      box.addEventListener('touchmove', function (e) {
-        slid = Math.max(slid, Math.abs(e.touches[0].clientX - startX));
-      }, { passive: true });
-      box.addEventListener('click', function () {
-        if (slid > 10) { slid = 0; return; }     // that was a scrub, not a tap
-        openCharts(run);
-      });
-      document.getElementById('chartbig').addEventListener('click', function (e) {
-        e.stopPropagation();
-        openCharts(run);
-      });
-    }
-    wireNotes(run);
-    pullNotes().then(function () {
-      var note = NOTES[run.id];
-      var field = document.getElementById('notetext');
-      if (field && note && !field.value && document.getElementById('run').classList.contains('on')) {
-        field.value = note.text || '';
-      }
-    });
-  };
-
-  function openBigMap(run, pts) {
-    openSheet(esc(run.n), '<div class="bigmap"></div>' +
-      '<p class="hint">Drag to move, pinch or scroll to zoom. The buttons switch the ' +
-      'background map, and the one at the bottom changes how the route is drawn.</p>',
-    function (body) {
-      var el = body.querySelector('.bigmap');
-      setTimeout(function () { new SlippyMap(el, pts, { run: run }); }, 0);
-    });
-  }
-
-  wireSettings();
-
-  var resizeTimer = null;                      // the map is pixel-based, so redraw it on resize
-  window.addEventListener('resize', function () {
-    if (!current || !document.getElementById('run').classList.contains('on')) return;
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(function () {
-      if (currentMap) { currentMap.fit(); }
-    }, 250);
-  });
-})();
-
-"""
-
-ROUTER = r"""
-(function () {
-  var pages = Array.prototype.slice.call(document.querySelectorAll('.page'));
-  var links = Array.prototype.slice.call(document.querySelectorAll('.tabs a'));
-  var names = pages.map(function (p) { return p.id; });
-  // sessionStorage, not localStorage: a reload keeps you where you were,
-  // but opening the app from the home screen always starts on Home.
-  var store = {
-    get: function () { try { return sessionStorage.getItem('dash-page'); } catch (e) { return null; } },
-    set: function (v) { try { sessionStorage.setItem('dash-page', v); } catch (e) {} }
-  };
-  function show(name, arg, scroll) {
-    if (names.indexOf(name) < 0) { name = names[0]; arg = ''; }
-    pages.forEach(function (p) { p.classList.toggle('on', p.id === name); });
-    var tab = name === 'run' ? 'runs' : name;      // a run page keeps the Runs tab lit
-    links.forEach(function (a) {
-      if (a.getAttribute('href') === '#/' + tab) a.setAttribute('aria-current', 'page');
-      else a.removeAttribute('aria-current');
-    });
-    if (name === 'run') {
-      if (window.showRun) window.showRun(parseInt(arg, 10));
-    } else {
-      document.title = 'Trening · ' + name.charAt(0).toUpperCase() + name.slice(1);
-      store.set(name);
-    }
-    if (scroll) window.scrollTo(0, 0);
-  }
-  function fromHash() { return (location.hash || '').replace(/^#\/?/, '').split('/'); }
-  // A new build deploys straight to the phone - no app store, no reinstalling.
-  // When the service worker has fetched one, offer a reload.
-  if ('serviceWorker' in navigator) {
-    var bar = document.getElementById('update');
-    var announce = function () {
-      bar.hidden = false;
-      document.getElementById('updatego').onclick = function () { location.reload(); };
-    };
-    navigator.serviceWorker.getRegistration().then(function (reg) {
-      if (!reg) return;
-      if (reg.waiting && navigator.serviceWorker.controller) announce();
-      reg.addEventListener('updatefound', function () {
-        var fresh = reg.installing;
-        if (!fresh) return;
-        fresh.addEventListener('statechange', function () {
-          if (fresh.state === 'installed' && navigator.serviceWorker.controller) announce();
-        });
-      });
-      var check = function () { reg.update().catch(function () {}); };
-      setInterval(check, 15 * 60 * 1000);
-      document.addEventListener('visibilitychange', function () {
-        if (!document.hidden) check();
-      });
-    }).catch(function () {});
-  }
-  window.addEventListener('hashchange', function () { var h = fromHash(); show(h[0], h[1], true); });
-  var start = fromHash();
-  show(start[0] || store.get() || names[0], start[1], false);
-})();
-
-(function () {
-  var tip = document.getElementById('tip');
-  function show(g, x, y) {
-    var parts = g.dataset.tip.split('|');
-    tip.innerHTML = '<b>' + parts[0] + '</b>' + parts.slice(1).join('<br>');
-    tip.style.display = 'block';
-    tip.style.left = Math.max(8, Math.min(x + 14, window.innerWidth - tip.offsetWidth - 8)) + 'px';
-    tip.style.top = (y + 14) + 'px';
-  }
-  document.querySelectorAll('.wk').forEach(function (g) {
-    g.addEventListener('mousemove', function (e) { show(g, e.clientX, e.clientY); });
-    g.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
-    g.addEventListener('touchstart', function (e) {
-      var t = e.touches[0]; show(g, t.clientX, t.clientY - 60);
-    }, { passive: true });
-  });
-  document.addEventListener('touchstart', function (e) {
-    if (!e.target.closest('.wk')) tip.style.display = 'none';
-  }, { passive: true });
-})();
-"""
+CSS = _web("app.css")
+
+# The browser code, in load order. The files share one function scope, so a
+# helper in core.js is visible to every file after it.
+APP_FILES = ["core.js", "charts.js", "map.js", "run.js", "mappage.js", "plan.js", "settings.js", "boot.js"]
+APP_JS = "(function () {\n" + "\n".join(_web(f) for f in APP_FILES) + "\n})();\n"
+ROUTER = _web("router.js")
 
 
 # --------------------------------------------------------------- assembling
@@ -2432,6 +848,12 @@ def prepare(activities, config, details=None):
         hist = (r["_detail"] or {}).get("hrhist")
         r["_zone_seconds"] = (zones_from_histogram(hist, max_hr) if hist
                               else {r["_zone"]: r["moving_time"]})
+        r["_kind"] = run_kind(r)
+        r["_effort"] = effort_of(r, max_hr)
+        hr = r.get("average_heartrate")
+        # metres covered per heartbeat: rises as the aerobic engine improves
+        r["_ef"] = (r["distance"] / r["moving_time"] * 60 / hr) if hr and r.get("moving_time") else None
+        r["_cad"] = round(r["average_cadence"] * 2) if r.get("average_cadence") else None
     runs.sort(key=lambda r: r["_date"], reverse=True)
 
     today = date.fromisoformat(config["today"]) if config.get("today") else date.today()
@@ -2445,11 +867,6 @@ def prepare(activities, config, details=None):
         if monday in week_km:
             week_km[monday][r["_zone"]] += r["distance"] / 1000
 
-    week_no, plan_start, before_start = plan_week_number(config, today)
-    sessions = week_sessions(week_no, this_monday, max_hr, config)
-    this_week_runs = sorted(week_runs[this_monday], key=lambda r: r["_date"])
-    extra_runs = match_runs_to_sessions(sessions, this_week_runs)
-    nxt, next_state = next_session(sessions, today)
 
     cutoff = datetime.combine(today - timedelta(days=27), datetime.min.time())
     recent = [r for r in runs if r["_date"] >= cutoff]
@@ -2460,56 +877,85 @@ def prepare(activities, config, details=None):
     hr_time = sum(v for k, v in zone_seconds.items() if k != "nohr")
     easy_share = f"{zone_seconds['easy'] / hr_time * 100:.0f}%" if hr_time else "-"
 
-    # pace trends: easy running per week, and each threshold session
-    easy_points = []
-    for w in weeks[-10:]:
-        easy = [r for r in week_runs.get(w, []) if r["_zone"] == "easy" and r["distance"]]
-        if len(easy) < 1:
-            continue
-        secs = sum(r["moving_time"] for r in easy)
-        km = sum(r["distance"] for r in easy) / 1000
-        hrs = [r["average_heartrate"] for r in easy if r.get("average_heartrate")]
-        pace = secs / km
-        tip = (f"Week of {w.strftime('%d.%m')}: {int(pace//60)}:{int(pace%60):02d} /km"
-               f"|{len(easy)} easy run{'s' if len(easy) != 1 else ''}, {km:.1f} km"
-               + (f"|Average {sum(hrs)/len(hrs):.0f} bpm" if hrs else ""))
-        easy_points.append((w.strftime("%d.%m"), pace, tip))
+    # ---- progress: load, efficiency, cadence, threshold reps, decoupling
+    week_effort = {w: sum(r["_effort"] or 0 for r in week_runs.get(w, [])) for w in weeks}
+    effort_band = {}
+    for i, w in enumerate(weeks):
+        prior = [week_effort[v] for v in weeks[max(0, i - 3):i] if week_effort[v]]
+        if len(prior) == 3:
+            avg = sum(prior) / 3
+            effort_band[w] = (avg * 0.75, avg * 1.25)
+    d28 = today - timedelta(days=27)
+    fmt_pc = lambda sec: f"{int(sec // 60)}:{int(sec % 60):02d}"
+    dated = sorted(runs, key=lambda r: r["_date"])
 
-    thr_points = []
-    for r in sorted([r for r in runs if r["_zone"] in ("threshold", "hard") and r["distance"]],
-                    key=lambda r: r["_date"])[-12:]:
-        pace = r["moving_time"] / (r["distance"] / 1000)
-        tip = (f"{r['_date'].strftime('%d.%m.%Y')}: {int(pace//60)}:{int(pace%60):02d} /km"
-               f"|{r['distance']/1000:.1f} km, {fmt_time(r['moving_time'])}"
-               f"|Average {hr_text(r)} bpm")
-        thr_points.append((r["_date"].strftime("%d.%m"), pace, tip))
+    speed_hr = [(r["average_heartrate"], r["moving_time"] / (r["distance"] / 1000),
+                 f'{escape(r["name"])}|{r["_date"].strftime("%d.%m.%Y")} · {r["distance"]/1000:.1f} km'
+                 f'|{fmt_pc(r["moving_time"] / (r["distance"] / 1000))} /km at {r["average_heartrate"]:.0f} bpm',
+                 r["_date"].date() >= d28)
+                for r in dated if r.get("average_heartrate") and r["distance"] >= 2000]
+
+    eff_points = [(r["_date"].date(), r["_ef"],
+                   f'{r["_ef"]:.2f} m per beat|{escape(r["name"])} · {r["_date"].strftime("%d.%m")}'
+                   f'|{fmt_pc(r["moving_time"] / (r["distance"] / 1000))} /km at {r["average_heartrate"]:.0f} bpm')
+                  for r in dated if r["_ef"] and r["_kind"] in ("easy", "long") and r["distance"] >= 3000]
+
+    cad_points = [(r["_date"].date(), r["_cad"],
+                   f'{r["_cad"]} steps/min|{escape(r["name"])} · {r["_date"].strftime("%d.%m")}'
+                   f'|{fmt_pc(r["moving_time"] / (r["distance"] / 1000))} /km')
+                  for r in dated if r["_cad"] and r["_cad"] > 120]
+
+    rep_points = []
+    for r in dated:
+        if r["_kind"] != "threshold":
+            continue
+        rp = rep_pace(r, max_hr)
+        if rp:
+            rep_points.append((r["_date"].date(), rp[0],
+                               f'{fmt_pc(rp[0])} /km in the reps|{escape(r["name"])} · {r["_date"].strftime("%d.%m")}'
+                               f'|Reps averaged {rp[1]:.0f} bpm'))
+
+    long_drift = []
+    for r in reversed(dated):
+        if r["_kind"] == "long":
+            dc = decoupling(r)
+            if dc is not None:
+                long_drift.append((r, dc))
+        if len(long_drift) == 8:
+            break
+
+    def avg(xs):
+        xs = [x for x in xs if x]
+        return sum(xs) / len(xs) if xs else None
+    ef_now = avg([r["_ef"] for r in recent if r["_kind"] in ("easy", "long")])
+    ef_before = avg([r["_ef"] for r in runs if r["_kind"] in ("easy", "long")
+                     and cutoff - timedelta(days=28) <= r["_date"] < cutoff])
+    cad_now = avg([r["_cad"] for r in recent])
 
     return {
         "max_hr": max_hr, "runs": runs, "today": today, "this_monday": this_monday,
-        "weeks": weeks, "week_km": week_km, "week_no": week_no, "plan_start": plan_start,
-        "before_start": before_start,
-        "week_label": "Warm-up week" if before_start else f"Week {week_no}",
-        "days_to_start": max((plan_start - today).days, 0),
-        "sessions": sessions, "extra_runs": extra_runs, "next": nxt, "next_state": next_state,
+        "weeks": weeks, "week_km": week_km,
+        "week_label": f"Week {today.isocalendar()[1]}",
         "this_week_km": sum(week_km[this_monday].values()),
         "avg4": sum(sum(week_km[w].values()) for w in weeks[-5:-1]) / 4,
         "runs28": len(recent), "zone_seconds": zone_seconds, "easy_share": easy_share,
         "detailed": sum(1 for r in runs if r["_detail"]),
         "latest": runs[0] if runs else None,
-        "easy_points": easy_points, "thr_points": thr_points,
+        "week_effort": week_effort, "effort_band": effort_band, "speed_hr": speed_hr,
+        "eff_points": eff_points, "cad_points": cad_points, "rep_points": rep_points,
+        "long_drift": long_drift, "ef_now": ef_now, "ef_before": ef_before, "cad_now": cad_now,
         "updated": config.get("updated", datetime.now().strftime("%d.%m.%Y %H:%M")),
         "version": config.get("version", "dev"),
-        "plan_days": {**DEFAULT_PLAN_DAYS, **config.get("plan_days", {})},
     }
 
 
-def render(activities, config, details=None, notes=None):
+def render(activities, config, details=None, notes=None, plan=None):
     d = prepare(activities, config, details)
     heads = {
         "home": ("Training", f'{d["week_label"]} · updated {d["updated"]}'),
-        "plan": ("Plan", "3 runs a week: one threshold session, two easy · Norwegian method"),
+        "plan": ("Plan", "Three runs a week: two at threshold, one long and easy · Marius Bakken's method"),
         "runs": ("Runs", "Your runs from Strava, last 140 days"),
-        "map": ("Map", "Every route on one map"),
+        "map": ("Map", "Every run on one map"),
         "progress": ("Progress", f'Max heart rate {d["max_hr"]} bpm · updated {d["updated"]}'),
         "settings": ("Settings", "Appearance is per device; training settings sync to your other devices"),
     }
@@ -2525,18 +971,18 @@ def render(activities, config, details=None, notes=None):
     conf = {"maxhr": d["max_hr"], "zones": [[k, label, lo, hi] for k, label, lo, hi, _ in ZONES],
             "names": NAMES, "colors": COLORS, "order": ORDER, "days": WEEKDAYS,
             "repo": config.get("repo", ""), "version": d["version"],
-            "planDays": d["plan_days"], "maxhrSet": d["max_hr"],
-            "planStart": d["plan_start"].isoformat()}
+            "today": d["today"].isoformat()}
     # "</" is escaped so a run named "</script>" cannot break out of the tag
     blob = lambda obj: json.dumps(obj, separators=(",", ":")).replace("</", "<\\/")
     data = (f'<script>window.CONF={blob(conf)};window.RUNS={blob(runs_payload(d))};'
-            f'window.NOTES={blob(notes or {})};</script>')
+            f'window.NOTES={blob(notes or {})};'
+            f'window.PLAN={blob({"standard": standard_plan(d["today"]), "saved": plan})};</script>')
     nav = "".join(f'<a href="#/{key}">{icon(key)}<span>{label}</span></a>' for key, label in PAGES)
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#2a78d6">
+<meta name="theme-color" content="#f2f4f6">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Trening">
 <link rel="manifest" href="manifest.webmanifest">
@@ -2552,11 +998,11 @@ def render(activities, config, details=None, notes=None):
 </script>
 <style>{CSS}</style></head>
 <body>
-<nav class="tabs" aria-label="Sections"><span class="brand">Trening</span>{nav}</nav>
+<nav class="tabs" aria-label="Sections"><span class="brand"><i></i>Trening</span>{nav}</nav>
 <div id="update" hidden><span>Update ready</span><button type="button" id="updatego">Reload</button></div>
 <main>{sections}</main>
 <div id="tip"></div>
 {data}
-<script>{RUN_VIEW}</script>
+<script>{APP_JS}</script>
 <script>{ROUTER}</script>
 </body></html>"""
