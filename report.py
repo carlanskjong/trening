@@ -50,8 +50,8 @@ DEFAULT_PLAN_DAYS = {"threshold": 1, "easy": 3, "long": 6}
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 SHORT_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-PAGES = [("home", "Home"), ("plan", "Plan"), ("runs", "Runs"), ("progress", "Progress"),
-         ("settings", "Settings")]
+PAGES = [("home", "Home"), ("plan", "Plan"), ("runs", "Runs"), ("map", "Map"),
+         ("progress", "Progress"), ("settings", "Settings")]
 SECTIONS = PAGES + [("run", "Run")]   # /run/<id> has no tab of its own
 
 
@@ -580,6 +580,21 @@ def runs_payload(d):
     return out
 
 
+def page_map(d):
+    """
+    Placeholder. The plan is a full-screen map holding every run at once plus a
+    heat map of the ground he covers most, reusing SlippyMap and the route
+    styles from the run page - so it waits until those are settled.
+    """
+    return (
+        '<section class="card"><h2>Not built yet</h2>'
+        '<p class="sub">This is where every run will sit on one map, with a heat map of '
+        'the roads and trails you run most often. It will use the same map and route '
+        'styles as a single run, so it is waiting until those are exactly right.</p>'
+        '<p class="sub">For now, open any run from '
+        '<a href="#/runs">Runs</a> to see its route.</p></section>')
+
+
 def page_settings(d):
     """
     Two kinds of setting. Appearance and map style are per device and take effect
@@ -690,6 +705,7 @@ ICONS = {
     "plan": '<rect x="3.5" y="5" width="17" height="16" rx="2"/><path d="M8 3v4M16 3v4M3.5 10h17"/>',
     "runs": '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
     "progress": '<path d="M3 17l5.5-5.5 3.5 3.5L21 6"/><path d="M15 6h6v6"/>',
+    "map": '<path d="M9 3 3 5.5v15L9 18l6 3 6-2.5v-15L15 6z"/><path d="M9 3v15M15 6v15"/>',
     "settings": '<circle cx="12" cy="12" r="3.2"/><path d="M19.4 14.5a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H2a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V2a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.6 1z"/>',
 }
 
@@ -845,15 +861,49 @@ h3 { font-size:19px; margin:0 0 6px; letter-spacing:-.01em; }
   box-shadow:0 1px 3px rgba(0,0,0,.18); }
 .mapzoom button { width:30px; height:30px; font-size:16px; padding:0; }
 .mapctl button.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-.mapbig { position:absolute; z-index:2; right:8px; bottom:20px; }
+.mapbig { position:absolute; z-index:2; right:8px; top:76px; }
 .mapinner { position:absolute; inset:0; will-change:transform; }
 .maptiles { position:absolute; inset:0; }
 img.maptile { position:absolute; }
 svg.route { position:absolute; inset:0; width:100%; height:100%; }
-.routeline { fill:none; stroke:#e8462a; stroke-width:4; stroke-linejoin:round; stroke-linecap:round; opacity:.92; }
-.startdot { fill:#fff; stroke:#e8462a; stroke-width:3; }
+/* The casing is the quiet edge drawn under the route, so the line stays
+   readable over a satellite photo or a busy street map. */
+:root { --routecase:rgba(255,255,255,.85); }
+:root[data-theme="dark"] { --routecase:rgba(0,0,0,.6); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --routecase:rgba(0,0,0,.6); }
+}
+.rline { fill:none; stroke-linejoin:round; stroke-linecap:round; }
+.startdot { fill:#fff; stroke:#0b0b0b; stroke-width:2.5; }
 .attrib { position:absolute; left:3px; bottom:2px; z-index:2; font-size:10px; color:#333;
   background:rgba(255,255,255,.72); padding:0 4px; border-radius:3px; pointer-events:none; }
+
+/* ---- route style picker ---- */
+/* Bottom right, clear of the map attribution in the opposite corner. */
+.mapstyle { position:absolute; z-index:3; right:8px; bottom:8px; }
+.stylebtn { display:flex; align-items:center; gap:7px; font:inherit; font-size:12px;
+  font-weight:500; line-height:1; padding:6px 10px 6px 7px; border-radius:7px;
+  border:1px solid var(--ring); background:var(--surface); color:var(--ink); cursor:pointer;
+  box-shadow:0 1px 3px rgba(0,0,0,.18); }
+.stylewatch { width:16px; height:8px; border-radius:99px; flex:none;
+  box-shadow:0 0 0 1px var(--ring) inset; }
+/* Opens upward over the map, which clips anything taller than itself, so it
+   stays compact enough to fit the small map on the run page. */
+.stylemenu[hidden], .maplegend[hidden] { display:none; }
+.stylemenu { position:absolute; right:0; bottom:calc(100% + 6px); width:150px; padding:4px;
+  border-radius:11px; border:1px solid var(--ring); background:var(--surface);
+  box-shadow:0 8px 26px rgba(0,0,0,.28); display:flex; flex-direction:column; gap:1px; }
+.stylemenu button { display:flex; align-items:center; gap:9px; text-align:left; font:inherit;
+  font-size:13px; line-height:1; padding:8px 9px; border:0; border-radius:8px;
+  background:none; color:var(--ink); cursor:pointer; }
+.stylemenu button:hover { background:var(--raise); }
+.stylemenu button.on { background:var(--accentsoft); font-weight:600; }
+.stylemenu .stylewatch { width:20px; height:7px; }
+.maplegend { position:absolute; z-index:2; right:8px; bottom:44px; display:flex; align-items:center;
+  gap:7px; font-size:10.5px; color:var(--ink); padding:4px 8px; border-radius:7px;
+  background:var(--surface); border:1px solid var(--ring); box-shadow:0 1px 3px rgba(0,0,0,.18);
+  pointer-events:none; font-variant-numeric:tabular-nums; }
+.maplegend i { display:block; width:62px; height:7px; border-radius:99px; }
 .stats { display:grid; grid-template-columns:repeat(4,1fr); }
 .stats div { padding:11px 6px; text-align:center; box-shadow:inset -1px -1px 0 var(--ring); }
 .stats .m { display:block; font-size:16px; font-weight:600; font-variant-numeric:tabular-nums; }
@@ -864,6 +914,11 @@ h2 .more { font:inherit; font-size:13px; font-weight:500; color:var(--accent); b
   border:0; padding:0; cursor:pointer; margin-left:auto; }
 .charts { cursor:zoom-in; }
 .clabel i { font-style:normal; color:var(--axis); }
+/* The pop-out charts are redrawn on every zoom step. `.chartgrab` sits on top
+   and survives those redraws, so a pinch is never cut short by the chart under
+   the fingers being replaced. pan-y keeps one-finger scrolling of the sheet. */
+.zoomwrap { position:relative; cursor:default; }
+.chartgrab { position:absolute; inset:0; touch-action:pan-y; }
 
 /* ---- pop-out sheet ---- */
 body.noscroll { overflow:hidden; }
@@ -998,6 +1053,9 @@ td.wrap { min-width:150px; }
   .zoombar button[data-act="reset"] { flex:1; }
   .mapctl button { font-size:11px; padding:5px 7px; }
   .mapctl { gap:3px; left:6px; top:6px; }
+  .mapstyle { right:6px; bottom:6px; }
+  .maplegend { right:6px; bottom:40px; font-size:10px; padding:3px 6px; gap:5px; }
+  .maplegend i { width:52px; }
   .zoombar button { flex:1; min-width:calc(50% - 4px); }
   .stats .m { font-size:15px; }
   .split .sp { width:40px; }
@@ -1088,6 +1146,124 @@ RUN_VIEW = r"""
     for (var i = 0; i < LAYERS.length; i++) if (LAYERS[i].id === id) return LAYERS[i];
     return LAYERS[0];
   }
+
+  /* ----------------------------------------------------------------
+   * Route styles
+   *
+   * Strava calls these "stat maps": the line is coloured by what you were
+   * doing at that point of the run rather than being one flat colour. The same
+   * ideas are here, with the app's own zone colours for heart rate so the map
+   * matches the zone bars on every other page.
+   *
+   * Everything below is deliberately generic - a style is a recipe of stroked
+   * layers - because the heat map page will draw many routes with the same
+   * code, just fed overlap counts instead of heart rate.
+   * -------------------------------------------------------------- */
+
+  // Zone colours, matching --s1..--s4 in the stylesheet. Fixed rather than read
+  // from CSS: over a map photo these have to stay readable in either appearance.
+  var ZONE_INK = { easy: '#2a78d6', moderate: '#eb6834', threshold: '#1baf7a',
+                   hard: '#eda100', nohr: '#b8b7b1' };
+
+  function hex2rgb(h) {
+    return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  }
+  // A colour t of the way (0..1) along a list of stops.
+  function ramp(stops, t) {
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    var f = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(f)), k = f - i;
+    var a = hex2rgb(stops[i]), b = hex2rgb(stops[i + 1]);
+    return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * k) + ',' +
+      Math.round(a[1] + (b[1] - a[1]) * k) + ',' +
+      Math.round(a[2] + (b[2] - a[2]) * k) + ')';
+  }
+
+  var PACE_RAMP = ['#3b6fd4', '#1ca37a', '#eda100', '#e8462a'];   // slow to fast
+  var ELEV_RAMP = ['#2e8b57', '#9dbb3f', '#e0b03c', '#9c5a2c'];   // low to high
+
+  /*
+   * A style says how to draw the line. `layers` are stroked one after another,
+   * widest first, so a casing or a glow can sit under the route itself.
+   * `metric` names which stream colours it; without one the line is flat.
+   */
+  var ROUTE_STYLES = [
+    { id: 'solid', name: 'Solid', swatch: '#e8462a',
+      hint: 'One clear line with a contrasting edge.',
+      layers: [{ w: 7, casing: true }, { w: 4, color: '#e8462a' }] },
+    { id: 'glow', name: 'Glow', swatch: '#ff7a2f',
+      hint: 'The warm heat-map look - best on satellite and in dark mode.',
+      layers: [{ w: 17, color: '#ff5e14', op: 0.16 }, { w: 10, color: '#ff7a2f', op: 0.34 },
+               { w: 4.5, color: '#ffc061', op: 0.95 }, { w: 1.6, color: '#fff3d6' }] },
+    { id: 'hr', name: 'Heart rate', swatch: '#1baf7a', metric: 'hr',
+      hint: 'Coloured by the zone you were in, like the zone bars.',
+      layers: [{ w: 7.5, casing: true }, { w: 4.5, metric: true }] },
+    { id: 'pace', name: 'Pace', swatch: '#3b6fd4', metric: 'sp',
+      hint: 'Blue where you ran slowest, red where you ran fastest.',
+      layers: [{ w: 7.5, casing: true }, { w: 4.5, metric: true }] },
+    { id: 'elev', name: 'Elevation', swatch: '#9dbb3f', metric: 'al',
+      hint: 'Green in the low places, brown on the high ground.',
+      layers: [{ w: 7.5, casing: true }, { w: 4.5, metric: true }] }
+  ];
+  // A swatch that looks like the line the style draws: flat for the plain ones,
+  // the colour ramp itself for the ones that paint by a stream.
+  ROUTE_STYLES.forEach(function (s) {
+    var stops = s.id === 'hr'
+      ? [ZONE_INK.easy, ZONE_INK.moderate, ZONE_INK.threshold, ZONE_INK.hard]
+      : s.id === 'pace' ? PACE_RAMP : s.id === 'elev' ? ELEV_RAMP : null;
+    s.ink = stops ? 'linear-gradient(to right,' + stops.join(',') + ')' : s.swatch;
+  });
+  function styleById(id) {
+    for (var i = 0; i < ROUTE_STYLES.length; i++) if (ROUTE_STYLES[i].id === id) return ROUTE_STYLES[i];
+    return ROUTE_STYLES[0];
+  }
+  var savedStyle = (function () {
+    try { return localStorage.getItem('pref-route') || 'solid'; } catch (e) { return 'solid'; }
+  })();
+
+  /*
+   * Line up a stream with the drawn route.
+   *
+   * The two do not match point for point: the route comes from Strava's
+   * summary_polyline, which keeps more points on bends and fewer on straights,
+   * while the streams are ~160 evenly spaced samples. So walk the route adding
+   * up its length, and for each point look up the sample at the same distance
+   * into the run. Returns one value per route point, or null when that stream
+   * was never recorded.
+   */
+  function alongRoute(run, pts, key) {
+    var stream = run[key];
+    if (!stream || !stream.length || !run.d || !run.d.length || pts.length < 2) return null;
+    var cum = [0], i, total;
+    for (i = 1; i < pts.length; i++) {
+      var dy = pts[i][0] - pts[i - 1][0];
+      var dx = (pts[i][1] - pts[i - 1][1]) * Math.cos(pts[i][0] * Math.PI / 180);
+      cum.push(cum[i - 1] + Math.sqrt(dx * dx + dy * dy));
+    }
+    total = cum[cum.length - 1];
+    var runEnd = run.d[run.d.length - 1];
+    if (!total || !runEnd) return null;
+    var out = [], j = 0, any = false;
+    for (i = 0; i < pts.length; i++) {
+      var want = cum[i] / total * runEnd;
+      while (j < run.d.length - 1 && run.d[j + 1] < want) j++;
+      var v = stream[j];
+      // A zero means "not recorded" for heart rate and speed. For altitude it
+      // means sea level, which is a real height.
+      if (v == null || (v === 0 && key !== 'al')) { out.push(null); } else { out.push(v); any = true; }
+    }
+    return any ? out : null;
+  }
+
+  // The colour for one point, 0..1 of the way through the metric's range.
+  function metricColor(styleId, value, lo, hi, maxhr) {
+    if (value == null) return null;
+    if (styleId === 'hr') {
+      var pct = value / (maxhr || 205) * 100;
+      return ZONE_INK[pct < 75 ? 'easy' : pct < 82 ? 'moderate' : pct < 88 ? 'threshold' : 'hard'];
+    }
+    var t = hi > lo ? (value - lo) / (hi - lo) : 0.5;
+    return ramp(styleId === 'elev' ? ELEV_RAMP : PACE_RAMP, t);
+  }
   var savedLayer = (function () {
     try { return localStorage.getItem('dash-layer') || localStorage.getItem('pref-map') || 'plain'; }
     catch (e) { return 'plain'; }
@@ -1115,29 +1291,121 @@ RUN_VIEW = r"""
     this.el = el;
     this.pts = points || [];
     this.layer = layerById(savedLayer);
+    this.style = styleById(savedStyle);
+    this.run = opts.run || null;
+    this.maxhr = (window.CONF && CONF.maxhr) || 205;
+    // Every stream the route can be coloured by, lined up with the drawn points
+    // once here rather than on each of the many redraws a drag causes.
+    this.metrics = {};
+    if (this.run) {
+      this.metrics.hr = alongRoute(this.run, this.pts, 'hs');
+      this.metrics.sp = alongRoute(this.run, this.pts, 'sp');
+      this.metrics.al = alongRoute(this.run, this.pts, 'al');
+    }
+    if (this.style.metric && !this.metrics[this.style.metric]) this.style = ROUTE_STYLES[0];
     this.z = 14; this.cx = 0; this.cy = 0;          // centre, in pixels at zoom z
     el.classList.add('map');
     el.innerHTML = '<div class="mapinner">' +
       '<div class="maptiles"></div>' +
-      '<svg class="route" preserveAspectRatio="none"><polyline class="routeline"/>' +
-      '<circle class="startdot" r="5"/></svg></div>' +
+      '<svg class="route" preserveAspectRatio="none"></svg></div>' +
       '<div class="mapctl">' +
       LAYERS.map(function (l) {
         return '<button type="button" data-layer="' + l.id + '">' + l.name + '</button>';
       }).join('') + '</div>' +
       '<div class="mapzoom"><button type="button" data-zoom="1" aria-label="Zoom in">+</button>' +
       '<button type="button" data-zoom="-1" aria-label="Zoom out">−</button></div>' +
+      '<div class="mapstyle"><button type="button" class="stylebtn" aria-haspopup="true">' +
+      '<span class="stylewatch"></span><span class="stylename"></span></button>' +
+      '<div class="stylemenu" hidden>' + ROUTE_STYLES.map(function (s) {
+        return '<button type="button" data-style="' + s.id + '" title="' + s.hint + '">' +
+          '<span class="stylewatch" style="background:' + s.ink + '"></span>' +
+          s.name + '</button>';
+      }).join('') + '</div></div>' +
+      '<div class="maplegend" hidden></div>' +
       (opts.expand ? '<button type="button" class="mapbig" title="Bigger">⤢</button>' : '') +
       '<span class="attrib"></span>';
     this.inner = el.querySelector('.mapinner');
     this.tiles = el.querySelector('.maptiles');
     this.svg = el.querySelector('.route');
-    this.line = el.querySelector('.routeline');
-    this.dot = el.querySelector('.startdot');
+    this.menu = el.querySelector('.stylemenu');
+    this.legend = el.querySelector('.maplegend');
     this.attrib = el.querySelector('.attrib');
     this.fit();
     this.bind(opts);
   }
+
+  // The lowest and highest value of the stream this style paints with, ignoring
+  // the extremes so one GPS spike cannot flatten the whole colour range.
+  SlippyMap.prototype.span = function () {
+    var vals = (this.metrics[this.style.metric] || []).filter(function (v) { return v != null; });
+    if (vals.length < 4) return null;
+    vals = vals.slice().sort(function (a, b) { return a - b; });
+    var lo = vals[Math.floor(vals.length * 0.05)], hi = vals[Math.floor(vals.length * 0.95)];
+    return hi > lo ? [lo, hi] : [vals[0], vals[vals.length - 1]];
+  };
+
+  /*
+   * The route as SVG. `xy` holds the screen position of every point.
+   *
+   * A flat style is one cheap <polyline> per layer. A coloured one needs its
+   * own stroke per step, so those layers become a run of two-point paths; the
+   * round line caps make them join up seamlessly.
+   */
+  SlippyMap.prototype.routeSVG = function (xy) {
+    var self = this, style = this.style, out = '';
+    var vals = style.metric ? this.metrics[style.metric] : null;
+    var range = vals ? this.span() : null;
+    var flat = 'M' + xy.join('L');
+    style.layers.forEach(function (lay) {
+      var stroke = lay.casing ? 'var(--routecase)' : lay.color;
+      var op = lay.op == null ? '' : ' stroke-opacity="' + lay.op + '"';
+      if (!lay.metric || !vals || !range) {
+        out += '<path class="rline" d="' + flat + '" stroke="' +
+          (stroke || '#e8462a') + '" stroke-width="' + lay.w + '"' + op + '/>';
+        return;
+      }
+      for (var i = 1; i < xy.length; i++) {
+        var c = metricColor(style.id, vals[i], range[0], range[1], self.maxhr);
+        if (!c) continue;
+        out += '<path class="rline" d="M' + xy[i - 1] + 'L' + xy[i] + '" stroke="' + c +
+          '" stroke-width="' + lay.w + '"/>';
+      }
+    });
+    return out + '<circle class="startdot" r="5" cx="' + xy[0].split(',')[0] +
+      '" cy="' + xy[0].split(',')[1] + '"/>';
+  };
+
+  // The key under the map: what the colours actually mean.
+  SlippyMap.prototype.drawLegend = function () {
+    var style = this.style, vals = style.metric ? this.metrics[style.metric] : null;
+    var range = vals ? this.span() : null;
+    if (!style.metric || !range) { this.legend.hidden = true; return; }
+    this.legend.hidden = false;
+    var lo = range[0], hi = range[1], fill, text;
+    if (style.id === 'hr') {
+      // The zones are steps, not a fade, so the bar gets hard edges.
+      fill = 'linear-gradient(to right,' + ['easy', 'moderate', 'threshold', 'hard']
+        .map(function (k, i) {
+          return ZONE_INK[k] + ' ' + (i * 25) + '% ' + ((i + 1) * 25) + '%';
+        }).join(',') + ')';
+      text = ['Easy', 'Hard'];
+    } else {
+      var stops = style.id === 'elev' ? ELEV_RAMP : PACE_RAMP;
+      fill = 'linear-gradient(to right,' + stops.join(',') + ')';
+      text = style.id === 'pace' ? [pace(100000 / lo), pace(100000 / hi)]
+                                 : [Math.round(lo) + ' m', Math.round(hi) + ' m'];
+    }
+    this.legend.innerHTML = '<b>' + text[0] + '</b><i style="background:' + fill +
+      '"></i><b>' + text[1] + '</b>';
+  };
+
+  SlippyMap.prototype.setStyle = function (id) {
+    this.style = styleById(id);
+    try { localStorage.setItem('pref-route', id); } catch (e) {}
+    savedStyle = id;
+    this.menu.hidden = true;
+    this.render();
+  };
 
   SlippyMap.prototype.size = function () {
     return [this.el.clientWidth || 320, this.el.clientHeight || 200];
@@ -1189,24 +1457,28 @@ RUN_VIEW = r"""
     this.inner.style.transform = '';
     this.attrib.textContent = this.layer.attrib;
     this.svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-    var line = '', p;
+    var xy = [], p;
     for (var i = 0; i < this.pts.length; i++) {
       p = project(this.pts[i][0], this.pts[i][1], this.z);
-      line += (p[0] * 256 - left).toFixed(1) + ',' + (p[1] * 256 - top).toFixed(1) + ' ';
+      xy.push((p[0] * 256 - left).toFixed(1) + ',' + (p[1] * 256 - top).toFixed(1));
     }
-    this.line.setAttribute('points', line);
-    if (this.pts.length) {
-      p = project(this.pts[0][0], this.pts[0][1], this.z);
-      this.dot.setAttribute('cx', (p[0] * 256 - left).toFixed(1));
-      this.dot.setAttribute('cy', (p[1] * 256 - top).toFixed(1));
-      this.dot.style.display = '';
-    } else {
-      this.dot.style.display = 'none';
-    }
+    this.svg.innerHTML = xy.length ? this.routeSVG(xy) : '';
     var ctl = this.el.querySelectorAll('.mapctl button');
     for (var c = 0; c < ctl.length; c++) {
       ctl[c].classList.toggle('on', ctl[c].dataset.layer === this.layer.id);
     }
+    // A style whose stream this run never recorded would draw a flat line with
+    // a misleading name, so offer only the ones there is data for.
+    var self = this;
+    var opts = this.el.querySelectorAll('.stylemenu button');
+    for (var s = 0; s < opts.length; s++) {
+      var st = styleById(opts[s].dataset.style);
+      opts[s].hidden = !!(st.metric && !self.metrics[st.metric]);
+      opts[s].classList.toggle('on', st.id === this.style.id);
+    }
+    this.el.querySelector('.stylename').textContent = this.style.name;
+    this.el.querySelector('.stylebtn .stylewatch').style.background = this.style.ink;
+    this.drawLegend();
   };
 
   // Zoom by a whole step, keeping whatever is under (ax, ay) where it is.
@@ -1323,10 +1595,12 @@ RUN_VIEW = r"""
 
     el.addEventListener('click', function (e) {
       var b = e.target.closest('button');
-      if (!b) return;
+      if (!b) { self.menu.hidden = true; return; }
       e.preventDefault();
       if (b.dataset.layer) self.setLayer(b.dataset.layer);
       else if (b.dataset.zoom) self.zoomBy(+b.dataset.zoom);
+      else if (b.dataset.style) self.setStyle(b.dataset.style);
+      else if (b.classList.contains('stylebtn')) self.menu.hidden = !self.menu.hidden;
       else if (b.classList.contains('mapbig') && opts.expand) opts.expand();
     });
   };
@@ -1430,12 +1704,23 @@ RUN_VIEW = r"""
     return html;
   }
 
-  // The moving readout shared by every chart in a box.
-  function attachProbe(box, readout, run, i0) {
-    var charts = box.querySelectorAll('.cchart');
-    if (!charts.length) return;
-    var n = +box.dataset.count;
+  /*
+   * The moving readout shared by every chart in a box.
+   *
+   * Attached ONCE per box. The charts inside are rebuilt on every zoom step, so
+   * the SVG elements are looked up at the moment a finger moves and never
+   * cached - a cached list would point at charts already thrown away, and
+   * re-attaching on each redraw would pile up a fresh set of listeners.
+   *
+   * `surface` is the element that hears the events. In the pop-out that is a
+   * transparent sheet which is never rebuilt, so a pinch is not cut short when
+   * the chart under the fingers is replaced mid-gesture.
+   */
+  function attachProbe(surface, box, readout, run) {
     function at(clientX) {
+      var charts = box.querySelectorAll('.cchart');
+      if (!charts.length) return;
+      var n = +box.dataset.count, i0 = +box.dataset.from || 0;
       var first = charts[0], rect = first.getBoundingClientRect();
       var left = +first.dataset.left, right = +first.dataset.right;
       var f = (clientX - rect.left) / rect.width * W;
@@ -1457,12 +1742,19 @@ RUN_VIEW = r"""
     }
     function clear() {
       readout.textContent = readout.dataset.idle;
+      var charts = box.querySelectorAll('.cchart');
       for (var c = 0; c < charts.length; c++) charts[c].querySelector('.cursor').style.opacity = 0;
     }
-    box.addEventListener('mousemove', function (e) { at(e.clientX); });
-    box.addEventListener('mouseleave', clear);
-    box.addEventListener('touchstart', function (e) { at(e.touches[0].clientX); }, { passive: true });
-    box.addEventListener('touchmove', function (e) { at(e.touches[0].clientX); }, { passive: true });
+    surface.addEventListener('mousemove', function (e) { at(e.clientX); });
+    surface.addEventListener('mouseleave', clear);
+    // One finger reads the charts. Two fingers are a pinch, and the readout has
+    // to keep its hands off it.
+    surface.addEventListener('touchstart', function (e) {
+      if (e.touches.length === 1) at(e.touches[0].clientX); else clear();
+    }, { passive: true });
+    surface.addEventListener('touchmove', function (e) {
+      if (e.touches.length === 1) at(e.touches[0].clientX);
+    }, { passive: true });
   }
 
   // ---------- pop-out ----------
@@ -1502,24 +1794,29 @@ RUN_VIEW = r"""
       '<button type="button" data-act="right">▶</button>' +
       '<button type="button" data-act="reset">Whole run</button></div>' +
       '<p class="hint" id="zoomrange"></p>' +
-      '<p class="readout" id="zoomout"></p><div class="charts" id="zoomcharts"></div>',
+      '<p class="readout" id="zoomout"></p>' +
+      '<div class="charts zoomwrap" id="zoomcharts"><div class="chartsin"></div>' +
+      '<div class="chartgrab"></div></div>',
     function (body) {
       var box = body.querySelector('#zoomcharts'), out = body.querySelector('#zoomout');
+      // The charts are redrawn inside `pane`; `grab` lies on top and is never
+      // rebuilt, so it keeps hearing the fingers all through a pinch.
+      var pane = box.querySelector('.chartsin'), grab = box.querySelector('.chartgrab');
       out.dataset.idle = 'Move across the charts to read any point.';
       function draw() {
         var from = Math.max(0, Math.round(view.i0));
         var to = Math.min(n, Math.round(view.i1));
         if (to - from < 8) to = Math.min(n, from + 8);
-        box.innerHTML = chartsHTML(run, from, to, true);
+        pane.innerHTML = chartsHTML(run, from, to, true);
         box.dataset.count = to - from;
         box.dataset.from = from;
-        out.textContent = out.dataset.idle;
         var kmA = run.d && run.d[from] != null ? (run.d[from] / 1000).toFixed(2) : '0';
         var kmB = run.d && run.d[to - 1] != null ? (run.d[to - 1] / 1000).toFixed(2) : '?';
         body.querySelector('#zoomrange').textContent =
           'Showing ' + kmA + ' km to ' + kmB + ' km of the run.';
-        attachProbe(box, out, run, from);
       }
+      attachProbe(grab, box, out, run);
+      out.textContent = out.dataset.idle;
       function zoom(k) {                       // k < 1 zooms in, around the middle
         var mid = (view.i0 + view.i1) / 2, half = (view.i1 - view.i0) * k / 2;
         view.i0 = Math.max(0, mid - half); view.i1 = Math.min(n, mid + half);
@@ -1561,17 +1858,17 @@ RUN_VIEW = r"""
           x: (e.touches[0].clientX + e.touches[1].clientX) / 2
         };
       }
-      box.addEventListener('touchstart', function (e) {
+      grab.addEventListener('touchstart', function (e) {
         if (e.touches.length !== 2) return;
         var f = fingers(e);
-        var rect = box.getBoundingClientRect();
+        var rect = grab.getBoundingClientRect();
         pinch = { d: f.d, x: f.x, i0: view.i0, i1: view.i1,
                   anchor: Math.min(1, Math.max(0, (f.x - rect.left) / rect.width)) };
       }, { passive: true });
-      box.addEventListener('touchmove', function (e) {
+      grab.addEventListener('touchmove', function (e) {
         if (!pinch || e.touches.length !== 2) return;
         e.preventDefault();
-        var f = fingers(e), rect = box.getBoundingClientRect();
+        var f = fingers(e), rect = grab.getBoundingClientRect();
         var span = pinch.i1 - pinch.i0;
         var fresh = Math.max(8, Math.min(n, span / (f.d / pinch.d)));
         // keep whatever sits under the middle of the fingers in place
@@ -1582,8 +1879,8 @@ RUN_VIEW = r"""
         schedule();
       }, { passive: false });
       function stopPinch() { pinch = null; }
-      box.addEventListener('touchend', stopPinch);
-      box.addEventListener('touchcancel', stopPinch);
+      grab.addEventListener('touchend', stopPinch);
+      grab.addEventListener('touchcancel', stopPinch);
       draw();
     });
   }
@@ -1975,7 +2272,8 @@ RUN_VIEW = r"""
     var wrap = host.querySelector('.mapwrap');
     var pts = run.poly ? decodePoly(run.poly) : [];
     if (pts.length > 1) {
-      currentMap = new SlippyMap(wrap, pts, { expand: function () { openBigMap(run, pts); } });
+      currentMap = new SlippyMap(wrap, pts,
+        { run: run, expand: function () { openBigMap(run, pts); } });
     } else {
       wrap.remove();
     }
@@ -1985,7 +2283,8 @@ RUN_VIEW = r"""
       var out = document.getElementById('readout');
       out.dataset.idle = 'Move across the chart to read any point.';
       out.textContent = out.dataset.idle;
-      attachProbe(box, out, run, 0);
+      box.dataset.from = 0;
+      attachProbe(box, box, out, run);
       var slid = 0, startX = 0;
       box.addEventListener('touchstart', function (e) {
         slid = 0; startX = e.touches[0].clientX;
@@ -2014,10 +2313,11 @@ RUN_VIEW = r"""
 
   function openBigMap(run, pts) {
     openSheet(esc(run.n), '<div class="bigmap"></div>' +
-      '<p class="hint">Drag to move, pinch or scroll to zoom, and switch between map, terrain and satellite.</p>',
+      '<p class="hint">Drag to move, pinch or scroll to zoom. The buttons switch the ' +
+      'background map, and the one at the bottom changes how the route is drawn.</p>',
     function (body) {
       var el = body.querySelector('.bigmap');
-      setTimeout(function () { new SlippyMap(el, pts, {}); }, 0);
+      setTimeout(function () { new SlippyMap(el, pts, { run: run }); }, 0);
     });
   }
 
@@ -2209,11 +2509,13 @@ def render(activities, config, details=None, notes=None):
         "home": ("Training", f'{d["week_label"]} · updated {d["updated"]}'),
         "plan": ("Plan", "3 runs a week: one threshold session, two easy · Norwegian method"),
         "runs": ("Runs", "Your runs from Strava, last 140 days"),
+        "map": ("Map", "Every route on one map"),
         "progress": ("Progress", f'Max heart rate {d["max_hr"]} bpm · updated {d["updated"]}'),
         "settings": ("Settings", "Appearance is per device; training settings sync to your other devices"),
     }
     bodies = {"home": page_home(d), "plan": page_plan(d), "runs": page_runs(d),
-              "progress": page_progress(d), "settings": page_settings(d), "run": page_run(d)}
+              "map": page_map(d), "progress": page_progress(d),
+              "settings": page_settings(d), "run": page_run(d)}
     sections = "".join(
         f'<section class="page" id="{key}" aria-label="{label}">'
         + ("" if key == "run" else

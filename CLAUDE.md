@@ -25,8 +25,8 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   derived from `STRAVA_CLIENT_SECRET` (the repo is public), and committed by the workflow, so each run costs
   two API calls once and nothing afterwards. At most 40 new runs per build, and it stops early if Strava's
   rate-limit headers say the window is nearly used up - the rest arrive on the next hourly build.
-- `report.py` – all dashboard HTML/CSS/SVG. It renders **one file containing five pages** – Home, Plan, Runs,
-  Progress, Settings – plus the menu (bottom tab bar on a phone, sidebar from 860px up). A tiny hash router (`#/home`,
+- `report.py` – all dashboard HTML/CSS/SVG. It renders **one file containing six pages** – Home, Plan, Runs,
+  Map, Progress, Settings – plus the menu (bottom tab bar on a phone, sidebar from 860px up). A tiny hash router (`#/home`,
   `#/plan`, …) shows one `<section class="page">` at a time, so switching pages needs no network. The file is in
   five marked parts: settings/helpers, the plan logic, charts (hand-built inline SVG), the pages, and the
   shell (CSS + router). Public API used by `build_site.py`: `render(activities, config, details)` and `RUN_TYPES`.
@@ -36,6 +36,15 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   OpenStreetMap tiles by hand (web-mercator maths in `RUN_VIEW`); there is **no Leaflet and no third-party
   JavaScript**, and with no network the route still draws on a blank background.
   Time in zones comes from the cached bpm histogram (real seconds per zone), not from a run's average.
+  **Route styles (23.09.2026)** – the line can be drawn five ways, picked with the button at the bottom
+  right of the map and remembered per device in `pref-route`: *Solid* (a line with a contrasting casing
+  under it), *Glow* (the warm heat-map look, best on satellite), and three coloured by a stream the way
+  Strava's "stat maps" are – *Heart rate* (the app's own zone colours, so the map matches the zone bars),
+  *Pace* and *Elevation*. `ROUTE_STYLES` is a list of recipes of stroked layers and `ramp()` mixes colours,
+  both written to be reused by the heat map. `alongRoute()` lines a stream up with the drawn route: the
+  polyline keeps more points on bends than on straights, so it walks the route adding up length and looks
+  up the sample at the same distance into the run. A style whose stream a run never recorded is hidden
+  from the menu. The legend at the bottom right names what the colours mean.
 - **App behaviour (PWA).** `site/sw.js` is written by every build with a fresh `VERSION` stamp
   (the build time). It precaches the shell and serves same-origin requests network-first, so the app opens
   instantly, **works with no signal**, and still shows the newest page when online. The login shell registers
@@ -76,8 +85,12 @@ MOCK_ACTIVITIES=sample_activities.json DASHBOARD_PASSWORD=test1234 python build_
 `strava_cache._shape`, so the sample detail has exactly the shape the cache stores. `build_site.py` picks up
 `sample_detail.json` automatically in mock mode (override with `MOCK_DETAIL`). To check a different week
 state, call `report.render(activities, config, details)` directly with `config["today"]` set to another date.
-Map tiles cannot be reached from a test sandbox - stub `**tile.openstreetmap.org/**` in Playwright to check
-map layout, and render with `details={}` to check how a run looks before its detail is cached. Open `site/index.html`
+Map tiles cannot be reached from a test sandbox - stub `**tile.openstreetmap.org/**` and
+`**arcgisonline.com/**` in Playwright (fulfil with a 1px PNG to see the route against a flat background)
+to check map layout, and render with `details={}` to check how a run looks before its detail is cached.
+Chromium lives at `/opt/pw-browsers/chromium-1194/chrome-linux/chrome`; pass it as `executable_path`.
+Pinch gestures need two fingers, which `page.touchscreen` cannot do - open a CDP session and send
+`Input.dispatchTouchEvent` with two touch points. Open `site/index.html`
 through a local HTTP server (WebCrypto needs a secure context: localhost is fine) and check **phone width (390px) and desktop**.
 Never commit `site/`, sample data with real personal data, or any secret. Add a `.gitignore` for `site/` and `__pycache__/`.
 
@@ -100,7 +113,9 @@ What each page holds now, and what is still missing:
    that sync between devices.
 4. **Progress** – weekly volume, time in zones, easy pace at easy HR, threshold-session pace over time.
    **Still to do: best efforts (1k/5k/10k) and run-vs-run comparison.**
-**Better maps – investigated 23.09.2026, decision pending.** He dislikes the tile styles. What was found:
+**Better maps – settled 23.09.2026: staying with raster tiles.** He likes the Plain style; the route styles
+above were added instead of changing provider. Vendoring MapLibre was considered and rejected - ~40k lines
+to keep patched forever, and it would run beside the dashboard password in the browser. What was found:
   * **CARTO Positron / Dark Matter** (the obvious clean choice) **now needs a free API key**; without one the
     tiles carry an "API key required" watermark. Doable but it puts a key in the page and needs him to register.
   * **OpenFreeMap** is keyless, unlimited and free, but serves **vector** tiles, so it needs MapLibre GL JS
@@ -113,9 +128,11 @@ What each page holds now, and what is still missing:
   to well-known URL patterns and have him confirm on the phone.
 
 **Asked for on 22.09.2026, not built yet:**
-5. **Map page in the menu** – a full-screen map to move around in, showing more than one run, plus a
-   **heat map** of where he runs most often. `SlippyMap` is already reusable; it needs a route layer that can
-   draw many polylines and count overlaps.
+5. **Map page in the menu** – the tab and page exist (23.09.2026) but hold only a placeholder, on his
+   instruction to finish the run map first and copy the style across. Still to do: a full-screen map showing
+   more than one run, plus a **heat map** of where he runs most often. `SlippyMap` and `ROUTE_STYLES` are
+   both reusable; what is missing is a layer that draws many polylines and counts overlaps, which can then
+   feed `ramp()` the overlap count in place of a heart rate.
 6. **Settings page** – done 23.09.2026: appearance (light / dark / follow system), default map style, training
    settings (max HR, plan start, which weekday each session lands on), the GitHub token (moved here from the
    notes card), and an About card with the build version, a "check for update" button and a "clear this device"
