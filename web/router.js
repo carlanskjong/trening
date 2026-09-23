@@ -16,6 +16,7 @@
       if (a.getAttribute('href') === '#/' + tab) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
     });
+    if (window.pageShown) window.pageShown(name);
     if (name === 'run') {
       if (window.showRun) window.showRun(parseInt(arg, 10));
     } else {
@@ -55,23 +56,3 @@
   show(start[0] || store.get() || names[0], start[1], false);
 })();
 
-(function () {
-  var tip = document.getElementById('tip');
-  function show(g, x, y) {
-    var parts = g.dataset.tip.split('|');
-    tip.innerHTML = '<b>' + parts[0] + '</b>' + parts.slice(1).join('<br>');
-    tip.style.display = 'block';
-    tip.style.left = Math.max(8, Math.min(x + 14, window.innerWidth - tip.offsetWidth - 8)) + 'px';
-    tip.style.top = (y + 14) + 'px';
-  }
-  document.querySelectorAll('.wk').forEach(function (g) {
-    g.addEventListener('mousemove', function (e) { show(g, e.clientX, e.clientY); });
-    g.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
-    g.addEventListener('touchstart', function (e) {
-      var t = e.touches[0]; show(g, t.clientX, t.clientY - 60);
-    }, { passive: true });
-  });
-  document.addEventListener('touchstart', function (e) {
-    if (!e.target.closest('.wk')) tip.style.display = 'none';
-  }, { passive: true });
-})();

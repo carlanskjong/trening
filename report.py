@@ -532,7 +532,7 @@ def page_runs(d):
             months.append(f'<h3 class="month">{key}</h3>')
         z = r["_zone"]
         months.append(
-            f'<a class="runrow" href="#/run/{r["id"]}">'
+            f'<a class="runrow" href="#/run/{r["id"]}" style="--zc:var(--z-{z})">'
             f'<div class="rmain"><span class="rdate">{SHORT_DAYS[r["_date"].weekday()]} '
             f'{r["_date"].strftime("%d.%m")}</span>'
             f'<span class="rname">{escape(r["name"])}</span>'
@@ -611,8 +611,6 @@ def page_settings(d):
     dashboard is built from, so they are saved to the repo like notes are and apply
     on the next build - within a few minutes of saving.
     """
-    days = "".join(f'<option value="{i}">{name}</option>' for i, name in enumerate(WEEKDAYS))
-    sess = {s["key"]: s for s in d["sessions"]}
     appearance = (
         '<div class="choices" id="themechoice" role="group" aria-label="Appearance">'
         '<button type="button" data-theme="system">Follow phone</button>'
@@ -621,12 +619,21 @@ def page_settings(d):
         '<p class="hint">"Follow phone" uses whatever your phone or PC is set to, '
         'including switching itself at night.</p>')
 
-    mapstyle = (
-        '<div class="choices" id="mapchoice" role="group" aria-label="Map style">'
-        '<button type="button" data-map="plain">Plain</button>'
-        '<button type="button" data-map="streets">Streets</button>'
+    maps = (
+        '<p class="eyebrow" style="margin:0 0 8px">Background</p>'
+        '<div class="choices" id="mapchoice" role="group" aria-label="Background map">'
+        '<button type="button" data-map="map">Map</button>'
+        '<button type="button" data-map="outdoor">Outdoor</button>'
         '<button type="button" data-map="satellite">Satellite</button></div>'
-        '<p class="hint">Which map a run opens with. You can still switch on the run itself.</p>')
+        '<p class="eyebrow" style="margin:16px 0 8px">Route line</p>'
+        '<div class="choices wrap" id="routechoice" role="group" aria-label="Route line">'
+        '<button type="button" data-route="solid">Solid</button>'
+        '<button type="button" data-route="glow">Glow</button>'
+        '<button type="button" data-route="hr">Heart rate</button>'
+        '<button type="button" data-route="pace">Pace</button>'
+        '<button type="button" data-route="elev">Height</button></div>'
+        '<p class="hint">What a map opens with. You can switch on the map itself, and the 3D button '
+        'tilts it over the real terrain.</p>')
 
     training = (
         f'<label class="field"><span>Maximum heart rate</span>'
@@ -635,16 +642,11 @@ def page_settings(d):
         f'{bpm(d["max_hr"], 88) - 1} bpm is your threshold band today.</p>'
         f'<label class="field"><span>Plan week 1 starts</span>'
         f'<input type="date" id="setstart" value="{d["plan_start"].isoformat()}"></label>'
-        f'<label class="field"><span>Threshold session</span>'
-        f'<select id="setday-threshold">{days}</select></label>'
-        f'<label class="field"><span>Easy run</span>'
-        f'<select id="setday-easy">{days}</select></label>'
-        f'<label class="field"><span>Long run</span>'
-        f'<select id="setday-long">{days}</select></label>'
         f'<div class="noterow"><button type="button" id="savetraining">Save</button>'
         f'<span class="hint" id="trainingstatus"></span></div>'
         f'<p class="hint">These change how the dashboard is built, so they appear after the '
-        f'next update - a few minutes. Saving needs the GitHub token below.</p>')
+        f'next update - a few minutes. To move a session to another day, drag it in the '
+        f'<a href="#/plan">Plan</a>. Saving needs the GitHub token below.</p>')
 
     syncing = (
         '<p class="hint" style="margin-top:0">Notes and the settings above are saved into your own '
@@ -669,7 +671,7 @@ def page_settings(d):
         f'</details>')
 
     return (card(appearance, head="Appearance")
-            + card(mapstyle, head="Maps")
+            + card(maps, head="Maps")
             + card(training, head="Training")
             + card(syncing, head="Saving and syncing")
             + card(about, head="About"))
@@ -724,11 +726,13 @@ def icon(name):
             f'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{ICONS[name]}</svg>')
 
 
-CSS = "\n" + _web("app.css")
+CSS = _web("app.css")
 
-RUN_VIEW = "\n" + _web("run.js")
-
-ROUTER = "\n" + _web("router.js")
+# The browser code, in load order. The files share one function scope, so a
+# helper in core.js is visible to every file after it.
+APP_FILES = ["core.js", "charts.js", "map.js", "run.js", "mappage.js", "plan.js", "settings.js", "boot.js"]
+APP_JS = "(function () {\n" + "\n".join(_web(f) for f in APP_FILES) + "\n})();\n"
+ROUTER = _web("router.js")
 
 
 # --------------------------------------------------------------- assembling
@@ -840,7 +844,7 @@ def render(activities, config, details=None, notes=None):
     conf = {"maxhr": d["max_hr"], "zones": [[k, label, lo, hi] for k, label, lo, hi, _ in ZONES],
             "names": NAMES, "colors": COLORS, "order": ORDER, "days": WEEKDAYS,
             "repo": config.get("repo", ""), "version": d["version"],
-            "planDays": d["plan_days"], "maxhrSet": d["max_hr"],
+            "planDays": d["plan_days"], "maxhrSet": d["max_hr"], "today": d["today"].isoformat(),
             "planStart": d["plan_start"].isoformat()}
     # "</" is escaped so a run named "</script>" cannot break out of the tag
     blob = lambda obj: json.dumps(obj, separators=(",", ":")).replace("</", "<\\/")
@@ -851,7 +855,7 @@ def render(activities, config, details=None, notes=None):
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#2a78d6">
+<meta name="theme-color" content="#f2f4f6">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Trening">
 <link rel="manifest" href="manifest.webmanifest">
@@ -867,11 +871,11 @@ def render(activities, config, details=None, notes=None):
 </script>
 <style>{CSS}</style></head>
 <body>
-<nav class="tabs" aria-label="Sections"><span class="brand">Trening</span>{nav}</nav>
+<nav class="tabs" aria-label="Sections"><span class="brand"><i></i>Trening</span>{nav}</nav>
 <div id="update" hidden><span>Update ready</span><button type="button" id="updatego">Reload</button></div>
 <main>{sections}</main>
 <div id="tip"></div>
 {data}
-<script>{RUN_VIEW}</script>
+<script>{APP_JS}</script>
 <script>{ROUTER}</script>
 </body></html>"""

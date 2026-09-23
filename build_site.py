@@ -248,25 +248,40 @@ SERVICE_WORKER = """/*
  */
 const VERSION = '__VERSION__';
 const CACHE = 'trening-' + VERSION;
+// Vendored files carry their version in the path, so they never change once
+// fetched: they live in their own cache that survives new builds.
+const VENDOR_CACHE = 'trening-vendor';
+const VENDOR = __VENDOR__;
 const SHELL = ['./', './index.html', './manifest.webmanifest',
                './icon.png', './icon-192.png', './icon-180.png', './icon-maskable.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE)
-    .then(c => Promise.allSettled(SHELL.map(u => c.add(u))))
-    .then(() => self.skipWaiting()));
+  e.waitUntil(Promise.all([
+    caches.open(CACHE).then(c => Promise.allSettled(SHELL.map(u => c.add(u)))),
+    caches.open(VENDOR_CACHE).then(c => Promise.allSettled(VENDOR.map(u =>
+      c.match(u).then(hit => hit || c.add(u))))),
+  ]).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
+  const wanted = new Set(VENDOR.map(u => new URL(u, self.registration.scope).href));
   e.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    .then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== VENDOR_CACHE).map(k => caches.delete(k))))
+    .then(() => caches.open(VENDOR_CACHE))
+    .then(c => c.keys().then(reqs => Promise.all(reqs.filter(r => !wanted.has(r.url)).map(r => c.delete(r)))))
     .then(() => self.clients.claim()));
 });
 
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
-  if (new URL(req.url).origin !== location.origin) return;   // map tiles, GitHub: leave alone
+  const url = new URL(req.url);
+  if (url.origin !== location.origin) return;   // map tiles, GitHub: leave alone
+  if (url.pathname.includes('/vendor/')) {       // pinned files: cache first
+    e.respondWith(caches.open(VENDOR_CACHE).then(c => c.match(req).then(hit => hit ||
+      fetch(req).then(res => { if (res.ok) c.put(req, res.clone()); return res; }))));
+    return;
+  }
   e.respondWith(
     fetch(req).then(res => {
       if (res && res.ok) {
@@ -300,7 +315,13 @@ def write_site(page_html, password, version):
     for name in ("icon.png", "icon-192.png", "icon-180.png", "icon-maskable.png"):
         if (ROOT / name).exists():
             shutil.copy(ROOT / name, SITE / name)
-    (SITE / "sw.js").write_text(SERVICE_WORKER.replace("__VERSION__", version), encoding="utf-8")
+    # the map library and the typeface: pinned, verified copies (see vendor/README.md)
+    shutil.copytree(ROOT / "vendor", SITE / "vendor",
+                    ignore=shutil.ignore_patterns("*.md", "*.sh"))   # licences ship with the code
+    vendored = sorted("./" + str(f.relative_to(SITE)) for f in (SITE / "vendor").rglob("*")
+                      if f.is_file() and f.suffix != ".txt")
+    (SITE / "sw.js").write_text(SERVICE_WORKER.replace("__VERSION__", version)
+                                .replace("__VENDOR__", json.dumps(vendored)), encoding="utf-8")
 
 
 def main():
