@@ -90,11 +90,32 @@
       }
       if (!d) return '';
       var out = '';
+      // the area under the line, fading downwards - Strava's look
       if (l.area) {
-        var base = g.sy(g.ylo).toFixed(1), first = d.match(/^M([\d.-]+)/), last = d.match(/([\d.-]+) [\d.-]+$/);
-        if (first && last) out += '<path d="' + d + 'L' + last[1] + ' ' + base + 'L' + first[1] + ' ' + base + 'Z" class="area ' + l.cls + '"/>';
+        var base = (g.T + g.ph).toFixed(1), first = d.match(/^M([\d.-]+)/), last = d.match(/([\d.-]+) [\d.-]+$/);
+        var gid = 'fade' + (++clipSeq);
+        if (first && last) {
+          out += '<linearGradient id="' + gid + '" x1="0" x2="0" y1="0" y2="1"><stop offset="0" class="gs0 ' + l.cls +
+            '"/><stop offset="1" class="gs1 ' + l.cls + '"/></linearGradient>' +
+            '<path d="' + d + 'L' + last[1] + ' ' + base + 'L' + first[1] + ' ' + base + 'Z" class="area ' + l.cls +
+            '" fill="url(#' + gid + ')"/>';
+        }
       }
-      return out + '<path d="' + d + '" class="ln ' + l.cls + '"/>';
+      return out + '<path d="' + d + '" class="ln ' + l.cls + (l.dash ? ' dash' : '') + '"/>';
+    },
+    // the elevation profile as a faint backdrop, in the lowest third, whatever the chart's own axis
+    silhouette: function (l, g) {
+      var lo = Infinity, hi = -Infinity, i;
+      for (i = 0; i < l.ys.length; i++) if (l.ys[i] != null) { lo = Math.min(lo, l.ys[i]); hi = Math.max(hi, l.ys[i]); }
+      if (!isFinite(lo)) return '';
+      var span = Math.max(hi - lo, 30), bottom = g.T + g.ph, d = '';
+      for (i = 0; i < l.ys.length; i++) {
+        if (l.ys[i] == null || l.xs[i] == null) continue;
+        var x = g.sx(l.xs[i]), y = bottom - (l.ys[i] - lo) / span * g.ph * 0.36;
+        d += (d ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
+      }
+      var a = d.match(/^M([\d.-]+)/), b = d.match(/([\d.-]+) [\d.-]+$/);
+      return a && b ? '<path d="' + d + 'L' + b[1] + ' ' + bottom + 'L' + a[1] + ' ' + bottom + 'Z" class="silh"/>' : '';
     },
     dots: function (l, g) {
       var r = (l.r || 4) + (g.big ? 1 : 0), out = '';
@@ -130,7 +151,7 @@
       if (l.y < g.ylo || l.y > g.yhi) return '';
       var y = g.sy(l.y).toFixed(1);
       return '<line x1="' + g.L + '" x2="' + (g.L + g.pw) + '" y1="' + y + '" y2="' + y + '" class="gd"/>' +
-        '<text x="' + (g.L + g.pw - 4) + '" y="' + (y - 5) + '" class="tk" text-anchor="end">' + l.text + '</text>';
+        (l.text ? '<text x="' + (g.L + 6) + '" y="' + (y - 5) + '" class="tk gdl">' + l.text + '</text>' : '');
     }
   };
 
@@ -489,13 +510,18 @@
   /* ================================================================
    * A run's charts: heart rate, pace, cadence and elevation, against distance
    * ================================================================ */
+  // A run's streams against distance (or minutes, when there is no distance).
+  // On a bike, speed in km/h stands in for pace.
   function seriesFor(run) {
-    var pc = (run.sp || []).map(function (v) { return v && v > 40 ? 100000 / v : null; });
-    var km = run.d && run.d.length === (run.hs || run.sp || []).length
+    var foot = onFoot(run);
+    var pc = (run.sp || []).map(function (v) {
+      return v && v > 40 ? (foot ? 100000 / v : v * 0.036) : null;
+    });
+    var km = run.d && run.d.length && run.d.length === (run.t || []).length
       ? run.d.map(function (v) { return v == null ? null : v / 1000; }) : null;
     var xs = km || (run.t || []).map(function (v) { return v / 60; });
-    return { x: xs, byKm: !!km, hr: run.hs || [], pace: smooth(pc), alt: run.al || [],
-             cad: (run.cd || []).map(function (v) { return v > 60 ? v : null; }) };
+    return { x: xs, byKm: !!km, foot: foot, hr: run.hs || [], pace: smooth(pc), alt: run.al || [],
+             cad: (run.cd || []).map(function (v) { return v > (foot ? 60 : 20) ? v : null; }) };
   }
   function visible(xs, ys, x0, x1) {
     var out = [];
@@ -507,33 +533,52 @@
     return [mid - span / 2 - span * k, mid + span / 2 + span * k];
   }
 
-  function runSpecs(run) {
+  /*
+   * A run's charts as specs. `other` (optional) is a second activity drawn as a
+   * dashed grey line under this one - the comparison view.
+   */
+  function runSpecs(run, other) {
     var s = seriesFor(run), n = s.x.length;
     if (n < 8) return [];
-    var xEnd = s.x[n - 1] || 1;
+    var o = other ? seriesFor(other) : null;
+    var xEnd = Math.max(s.x[n - 1] || 1, o && o.x.length ? o.x[o.x.length - 1] || 0 : 0);
     var X = {
       lo: 0, hi: xEnd, minSpan: s.byKm ? 0.3 : 2,
       fmt: function (v, step) {
         return s.byKm ? (step < 1 ? v.toFixed(1) : v.toFixed(0)) + ' km' : Math.round(v) + ' min';
       },
-      steps: s.byKm ? [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20] : [1, 2, 5, 10, 15, 30, 60]
+      steps: s.byKm ? [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50] : [1, 2, 5, 10, 15, 30, 60]
     };
     var specs = [];
     function spec(key, label, unit, h, y, layers, extra) {
+      if (o && key !== 'cad' && o[key] && o[key].some(function (v) { return v; })) {
+        layers.splice(layers.length - 1, 0, { type: 'line', xs: o.x, ys: o[key], cls: 'cmp', dash: true });
+      }
       specs.push(Object.assign({ key: key, label: label, unit: unit, h: h, x: X, y: y, zoom: 'x', layers: layers,
         probe: { xs: s.x, ys: s[key], cls: key } }, extra || {}));
     }
     var tall = function (base) { return function (w) { return Math.round(base * (w > 600 ? 1.2 : 1)); }; };
+    // the height profile behind the other charts, faintly, the way Strava shows it
+    var backdrop = !o && s.alt.some(function (v) { return v != null; })
+      ? [{ type: 'silhouette', xs: s.x, ys: s.alt }] : [];
+    var withOther = function (fit) {
+      return function (a, b) {
+        var mine = fit(s, a, b), theirs = o ? fit(o, a, b) : null;
+        if (!mine) return theirs;
+        return theirs ? [Math.min(mine[0], theirs[0]), Math.max(mine[1], theirs[1])] : mine;
+      };
+    };
+    var avgLine = function (v, text) { return v ? [{ type: 'guide', y: v, text: text }] : []; };
 
     if (s.hr.some(function (v) { return v; })) {
       var bands = conf.zones.map(function (z) {
         return { lo: conf.maxhr * z[2] / 100, hi: conf.maxhr * z[3] / 100, key: z[0], label: z[1] };
       });
       var edges = conf.zones.slice(1).map(function (z) { return Math.round(conf.maxhr * z[2] / 100); });
-      var fitHr = function (a, b) {
-        var v = visible(s.x, s.hr, a, b);
+      var fitHr = withOther(function (q, a, b) {
+        var v = visible(q.x, q.hr, a, b);
         return v.length ? padRange(Math.min.apply(null, v), Math.max.apply(null, v), 16, 0.08) : null;
-      };
+      });
       var full = fitHr(0, xEnd);
       spec('hr', 'Heart rate', 'bpm', tall(170), {
         lo: full[0], hi: full[1], fit: fitHr,
@@ -543,38 +588,48 @@
           var e = edges.filter(function (v) { return v > lo + 2 && v < hi - 2; });
           return e.length >= 2 ? e : ticksFor(lo, hi, count, [5, 10, 20, 25, 50]);
         }
-      }, [{ type: 'hbands', bands: bands }, { type: 'line', xs: s.x, ys: s.hr, cls: 'hr' }]);
+      }, [{ type: 'hbands', bands: bands }].concat(backdrop, avgLine(run.hr, 'avg ' + run.hr),
+          [{ type: 'line', xs: s.x, ys: s.hr, cls: 'hr', area: true }]));
     }
     if (s.pace.filter(function (v) { return v; }).length > 5) {
-      var fitPace = function (a, b) {
-        var v = visible(s.x, s.pace, a, b);
+      var fitPace = withOther(function (q, a, b) {
+        var v = visible(q.x, q.pace, a, b);
         if (v.length < 3) return null;
-        return padRange(percentile(v, 0.02), percentile(v, 0.97), 20, 0.06);
-      };
+        return s.foot ? padRange(percentile(v, 0.02), percentile(v, 0.97), 20, 0.06)
+          : padRange(percentile(v, 0.03), percentile(v, 0.99), 5, 0.06);
+      });
       var fp = fitPace(0, xEnd);
-      spec('pace', 'Pace', 'min/km · faster is higher', tall(140), {
-        lo: fp[0], hi: fp[1], fit: fitPace, invert: true, fmt: pace, steps: [5, 10, 15, 20, 30, 60, 120, 300]
-      }, [{ type: 'line', xs: s.x, ys: s.pace.map(function (v) { return v == null ? null : clamp(v, fp[0] - 60, fp[1] + 60); }), cls: 'pace' }]);
+      var avgPace = run.m && run.s ? (s.foot ? run.s / (run.m / 1000) : run.m / run.s * 3.6) : null;
+      var clampP = function (v) { return v == null ? null : clamp(v, fp[0] - 60, fp[1] + 60); };
+      spec('pace', s.foot ? 'Pace' : 'Speed', s.foot ? 'min/km · faster is higher' : 'km/h', tall(150), {
+        lo: fp[0], hi: fp[1], fit: fitPace, invert: s.foot,
+        fmt: s.foot ? pace : function (v) { return Math.round(v); },
+        steps: s.foot ? [5, 10, 15, 20, 30, 60, 120, 300] : [1, 2, 5, 10, 20]
+      }, backdrop.concat(avgLine(avgPace, 'avg ' + (s.foot ? pace(avgPace) : avgPace && avgPace.toFixed(1))),
+          [{ type: 'line', xs: s.x, ys: s.pace.map(clampP), cls: 'pace', area: true }]));
     }
     if (s.cad.filter(function (v) { return v; }).length > 5) {
       var pts = [];
-      s.cad.forEach(function (v, i) { if (v) pts.push({ x: s.x[i], y: v, fill: cadColour(v) }); });
+      s.cad.forEach(function (v, i) { if (v) pts.push({ x: s.x[i], y: v, fill: s.foot ? cadColour(v) : null }); });
       var fitCad = function (a, b) {
         var v = visible(s.x, s.cad, a, b);
         if (v.length < 3) return null;
         // keep 160-170 in sight, so the colours have their scale next to them
-        return padRange(Math.min(percentile(v, 0.02), CAD_LOW - 4), Math.max(percentile(v, 0.98), CAD_GOOD + 4), 20, 0.05);
+        return s.foot && isRun(run)
+          ? padRange(Math.min(percentile(v, 0.02), CAD_LOW - 4), Math.max(percentile(v, 0.98), CAD_GOOD + 4), 20, 0.05)
+          : padRange(percentile(v, 0.02), percentile(v, 0.98), 10, 0.08);
       };
       var fc = fitCad(0, xEnd);
-      spec('cad', 'Cadence', 'steps/min', tall(130), {
+      spec('cad', 'Cadence', s.foot ? 'steps/min' : 'rpm', tall(130), {
         lo: fc[0], hi: fc[1], fit: fitCad, fmt: function (v) { return Math.round(v); }, steps: [5, 10, 20]
-      }, [{ type: 'dots', pts: pts, r: 2.6, cls: 'cad' }], { legend: cadLegend() });
+      }, backdrop.concat([{ type: 'dots', pts: pts, r: 2.6, cls: s.foot ? 'cad' : 'cad plain' }]),
+        { legend: isRun(run) ? cadLegend() : '' });
     }
     if (s.alt.some(function (v) { return v != null; })) {
-      var fitAlt = function (a, b) {
-        var v = visible(s.x, s.alt, a, b);
+      var fitAlt = withOther(function (q, a, b) {
+        var v = visible(q.x, q.alt, a, b);
         return v.length ? padRange(Math.min.apply(null, v), Math.max.apply(null, v), 20, 0.1) : null;
-      };
+      });
       var fa = fitAlt(0, xEnd);
       spec('alt', 'Elevation', 'm', tall(110), {
         lo: fa[0], hi: fa[1], fit: fitAlt, fmt: function (v) { return Math.round(v) + ''; }, steps: [2, 5, 10, 20, 25, 50, 100, 200, 500]

@@ -1,23 +1,35 @@
   /* ================================================================
-   * One run: map, numbers, charts, laps, splits, zones and your notes.
-   * Drawn in the browser from window.RUNS when #/run/<id> is opened.
+   * One activity: map, numbers, the coach's verdict and the plan check,
+   * charts, reps, splits, zones, best efforts, the same route over time, a
+   * comparison, and your notes. Drawn in the browser when #/run/<id> opens;
+   * an older activity fetches its detail first (loadDetail).
    * ================================================================ */
   var host = document.getElementById('rundetail');
 
   function pushNotes() { return putEncrypted('notes.enc', NOTES, 'Save run notes'); }
 
+  var FEEL = ['', 'Very easy', 'Easy', 'Easy', 'Comfortable', 'Steady', 'Comfortably hard', 'Hard',
+              'Very hard', 'Very, very hard', 'All out'];
   function notesBlock(run) {
-    var note = NOTES[run.id] || {};
+    var note = NOTES[run.id] || {}, rpe = +note.rpe || 0;
     var tail = store.token() ? ''
       : '<p class="hint">Notes save on this device straight away. To have them appear on your ' +
         'other devices too, add a GitHub token in <a href="#/settings">Settings</a>.</p>';
-    return '<section class="card" id="notecard"><h2>Your notes</h2>' +
-      '<textarea id="notetext" rows="4" placeholder="How did it feel? Legs, weather, anything worth ' +
-      'remembering next time.">' + esc(note.text || '') + '</textarea>' +
+    var scale = '';
+    for (var i = 1; i <= 10; i++) {
+      scale += '<button type="button" data-rpe="' + i + '" class="' + (i === rpe ? 'on' : '') + '" aria-pressed="' +
+        (i === rpe) + '" aria-label="' + i + ' - ' + FEEL[i] + '">' + i + '</button>';
+    }
+    return '<section class="card" id="notecard"><h2>How did it feel?</h2>' +
+      '<div class="rpe" role="group" aria-label="How hard it felt, 1 to 10">' + scale + '</div>' +
+      '<p class="rpe-say" id="rpesay">' + (rpe ? rpe + ' · ' + FEEL[rpe] : 'Tap how hard it felt, 1 (very easy) to 10 (all out).') + '</p>' +
+      '<textarea id="notetext" rows="3" placeholder="Legs, weather, anything worth remembering next time.">' +
+      esc(note.text || '') + '</textarea>' +
       '<div class="noterow"><button type="button" id="notesave">Save</button>' +
       '<span id="notestatus" class="hint">' +
       (note.updated ? 'Last saved ' + esc(note.updated.slice(0, 16).replace('T', ' ')) : '') +
-      '</span></div>' + tail + '</section>';
+      '</span></div>' + tail +
+      '<p class="hint">Threshold should feel about 6–7: you can say three words at a time. Easy runs 2–4.</p></section>';
   }
 
   function wireNotes(run) {
@@ -25,12 +37,26 @@
     var status = document.getElementById('notestatus');
     var saveBtn = document.getElementById('notesave');
     if (!text) return;
+    var rpe = +(NOTES[run.id] || {}).rpe || 0;
+    document.querySelector('#notecard .rpe').addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-rpe]');
+      if (!b) return;
+      rpe = +b.dataset.rpe === rpe ? 0 : +b.dataset.rpe;
+      this.querySelectorAll('button').forEach(function (x) {
+        var on = +x.dataset.rpe === rpe;
+        x.classList.toggle('on', on); x.setAttribute('aria-pressed', on);
+      });
+      document.getElementById('rpesay').textContent = rpe ? rpe + ' · ' + FEEL[rpe] : 'Not set.';
+      status.textContent = 'Not saved yet.';
+    });
     saveBtn.addEventListener('click', async function () {
       saveBtn.disabled = true;
       status.textContent = 'Saving…';
       var body = text.value.trim();
-      if (body) NOTES[run.id] = { text: body, updated: new Date().toISOString() };
-      else delete NOTES[run.id];
+      if (body || rpe) {
+        NOTES[run.id] = { text: body, updated: new Date().toISOString() };
+        if (rpe) NOTES[run.id].rpe = rpe;
+      } else delete NOTES[run.id];
       store.local(NOTES);                       // never lose it, whatever GitHub says
       var res = await pushNotes();
       status.textContent = res.ok ? 'Saved and synced.' : WHY[res.why] || 'Saved on this device.';
@@ -40,40 +66,87 @@
 
   // ---------- numbers ----------
   function statGrid(run) {
-    var cells = [
-      [(run.m / 1000).toFixed(2), 'km'],
-      [hms(run.s), 'moving'],
-      [pace(run.s / (run.m / 1000)), '/km'],
-      [run.up + ' m', 'climb']
-    ];
+    var foot = onFoot(run), cells = [];
+    if (run.m >= 100) cells.push([(run.m / 1000).toFixed(2), 'km']);
+    cells.push([hms(run.s), 'moving']);
+    if (run.m >= 500 && run.s) {
+      cells.push(foot ? [pace(run.s / (run.m / 1000)), '/km'] : [(run.m / run.s * 3.6).toFixed(1), 'km/h']);
+    }
+    if (foot && run.gap && run.m >= 500 && Math.abs(run.gap - run.s / (run.m / 1000)) >= 3) {
+      cells.push([pace(run.gap), 'GAP /km']);
+    }
+    if (run.m >= 100) cells.push([run.up + ' m', 'climb']);
     if (run.hr) cells.push([run.hr, 'avg bpm']);
     if (run.mhr) cells.push([run.mhr, 'max bpm']);
-    if (run.cad) cells.push([run.cad, 'steps/min']);
+    if (run.cad) cells.push([run.cad, foot ? 'steps/min' : 'rpm']);
     if (run.re) cells.push([run.re, 'effort']);
+    if (run.cal) cells.push([run.cal, 'kcal']);
+    if (run.temp != null && run.temp !== undefined) cells.push([run.temp + '°', 'temperature']);
     if (run.e && run.e > run.s + 30) cells.push([hms(run.e), 'elapsed']);
+    var gear = [run.gear, run.dev].filter(Boolean).map(esc).join(' · ');
     return '<div class="stats">' + cells.map(function (c) {
       return '<div><span class="m">' + c[0] + '</span><span class="u">' + c[1] + '</span></div>';
-    }).join('') + '</div>';
+    }).join('') + '</div>' + (gear ? '<p class="gearline">' + gear + '</p>' : '');
   }
 
+  // Time in each zone, one bar per zone - the Strava way of showing it.
   function zoneBlock(run) {
-    var total = 0, keys = conf.order, i;
-    for (i = 0; i < keys.length; i++) total += run.zs[keys[i]] || 0;
-    if (!total) return '';
-    var bar = '', list = '';
-    for (i = 0; i < keys.length; i++) {
-      var v = run.zs[keys[i]] || 0;
-      if (!v) continue;
-      bar += '<div class="bar-seg ' + zoneColor(keys[i]) + '" style="width:' + (v / total * 100).toFixed(2) + '%"></div>';
-      list += '<div class="zrow"><span><i class="dot ' + zoneColor(keys[i]) + '"></i>' + conf.names[keys[i]] +
-        '</span><span class="num">' + hms(v) + ' · ' + Math.round(v / total * 100) + '%</span></div>';
-    }
-    return '<section class="card"><h2>Time in zones</h2><div class="bar">' + bar + '</div>' +
-      '<div class="zlist">' + list + '</div>' +
-      '<p class="hint">Measured second by second from the heart-rate strap, not from the run’s average.</p></section>';
+    var keys = ['easy', 'moderate', 'threshold', 'hard'], zs = run.zs || {}, total = 0, top = 0;
+    keys.forEach(function (k) { total += zs[k] || 0; top = Math.max(top, zs[k] || 0); });
+    if (!total || !run.hs || !run.hs.length) return '';
+    var rows = conf.zones.map(function (z) {
+      var v = zs[z[0]] || 0, lo = Math.round(conf.maxhr * z[2] / 100), hi = Math.round(conf.maxhr * z[3] / 100) - 1;
+      var range = z[2] === 0 ? 'under ' + (hi + 1) : z[3] > 100 ? lo + '+' : lo + '–' + hi;
+      return '<div class="zbar"><span class="zb-name"><b>' + z[1] + '</b><small>' + range + ' bpm</small></span>' +
+        '<span class="zb-track"><i style="width:' + (v / top * 100).toFixed(1) + '%;background:var(--z-' + z[0] + ')"></i></span>' +
+        '<span class="zb-val"><b>' + Math.round(v / total * 100) + '%</b><small>' + hms(v) + '</small></span></div>';
+    }).join('');
+    return '<section class="card"><h2>Heart-rate zones</h2><div class="zbars">' + rows + '</div>' +
+      '<p class="hint">Measured second by second from the strap, not from the average.</p></section>';
   }
 
-  function lapsBlock(run) {
+  // The work intervals of a session, as bars (pace) with their heart rate.
+  function repsBlock(run) {
+    if (!run.reps || run.reps.length < 2) return lapsBlock(run, false);
+    var rows = run.reps.map(function (r, i) {
+      var z = r.hr ? zoneOf(r.hr) : 'nohr';
+      return '<tr><td class="num">' + (i + 1) + '</td><td class="num">' + hms(r.s) + '</td>' +
+        '<td class="num">' + (r.m >= 1000 ? (r.m / 1000).toFixed(2) + ' km' : r.m + ' m') + '</td>' +
+        '<td class="num"><b>' + pace(r.s / (r.m / 1000)) + '</b></td>' +
+        '<td class="num"><i class="dot" style="background:var(--z-' + z + ')"></i>' + (r.hr || '-') + '</td>' +
+        '<td class="num">' + (r.mhr || '-') + '</td></tr>';
+    }).join('');
+    var rs = run.rs || {};
+    return '<section class="card"><h2>Reps <span class="h2sub">' + rs.n + ' × ' + hms(rs.avg_s) + ' · ' +
+      pace(rs.pace) + ' /km · ' + (rs.hr || '-') + ' bpm</span></h2>' +
+      '<div class="pc" id="repchart"></div>' +
+      '<div class="scroll"><table><tr><th>#</th><th>Time</th><th>Distance</th><th>Pace</th><th>Avg HR</th><th>Max HR</th></tr>' +
+      rows + '</table></div><p class="hint">Found from ' + (run.reps[0].lap ? 'your laps' : 'the pace - press the lap button ' +
+      'at each rep and short reps show too') + '. Heart rate lags in the first minute of a rep, so short reps often end ' +
+      'under ' + Math.round(conf.maxhr * 0.82) + ' - that is not a failure.</p>' + lapsBlock(run, true) + '</section>';
+  }
+  function repSpec(run) {
+    var reps = run.reps, n = reps.length, paces = reps.map(function (r) { return r.s / (r.m / 1000); });
+    var lo = Math.min.apply(null, paces), hi = Math.max.apply(null, paces), span = Math.max(hi - lo, 10);
+    var t = conf.targets && conf.targets.threshold;
+    return {
+      label: 'Pace of each rep', h: function (w) { return w > 600 ? 200 : 170; }, zoom: 'x', nearBy: 'x', left: 44,
+      x: { lo: 0.4, hi: n + 0.6, minSpan: 3, fmt: function (v) { return '#' + v; },
+           ticks: function (a, b) { var o = []; for (var i = Math.ceil(a); i <= b; i++) o.push(i); return o; } },
+      y: { lo: lo - span * 0.6, hi: hi + span * 0.4, invert: true, fmt: pace, steps: [2, 5, 10, 15, 30, 60] },
+      layers: (t ? [{ type: 'hbands', bands: [{ lo: t.lo, hi: t.hi, key: 'threshold', label: 'Your threshold pace' }] }] : [])
+        .concat([{ type: 'line', xs: reps.map(function (_, i) { return i + 1; }), ys: paces, cls: 'pace' },
+          { type: 'dots', r: 5, pts: reps.map(function (r, i) {
+            return { x: i + 1, y: paces[i], fill: 'var(--z-' + (r.hr ? zoneOf(r.hr) : 'nohr') + ')' };
+          }) }]),
+      tips: reps.map(function (r, i) {
+        return { x: i + 1, y: paces[i], html: 'Rep ' + (i + 1) + '|' + hms(r.s) + ' · ' + pace(paces[i]) + ' /km' +
+          (r.hr ? '|' + r.hr + ' bpm average' + (r.mhr ? ', ' + r.mhr + ' max' : '') : '') };
+      })
+    };
+  }
+
+  function lapsBlock(run, folded) {
     if (!run.laps || run.laps.length < 2) return '';
     var rows = run.laps.map(function (l) {
       var p = l.m ? l.s / (l.m / 1000) : 0;
@@ -83,40 +156,184 @@
         '<td class="num">' + hms(l.s) + '</td><td class="num">' + pace(p) + '</td>' +
         '<td class="num">' + (l.hr || '-') + '</td><td class="num">' + (l.mhr || '-') + '</td></tr>';
     }).join('');
-    return '<section class="card"><h2>Laps</h2><div class="scroll"><table>' +
-      '<tr><th>#</th><th>Distance</th><th>Time</th><th>Pace</th><th>Avg HR</th><th>Max HR</th></tr>' +
-      rows + '</table></div><p class="hint">Bold rows with the amber edge reached threshold heart rate (' +
-      Math.round(conf.maxhr * 0.82) + '–' + (Math.round(conf.maxhr * 0.88) - 1) + ' bpm). A rep that stayed ' +
-      'under is not a failure - heart rate lags in the first minute, so short reps often finish just below.</p></section>';
+    var table = '<div class="scroll"><table>' +
+      '<tr><th>#</th><th>Distance</th><th>Time</th><th>Pace</th><th>Avg HR</th><th>Max HR</th></tr>' + rows + '</table></div>';
+    if (folded) return '<details class="fold"><summary>All ' + run.laps.length + ' laps</summary>' + table + '</details>';
+    return '<section class="card"><h2>Laps</h2>' + table + '<p class="hint">Bold rows with the amber edge reached ' +
+      'threshold heart rate (' + Math.round(conf.maxhr * 0.82) + '–' + (Math.round(conf.maxhr * 0.88) - 1) + ' bpm).</p></section>';
   }
 
   function splitsBlock(run) {
     if (!run.sl || !run.sl.length) return '';
-    var paces = run.sl.map(function (s) { return s.s; });
+    var foot = onFoot(run), paces = run.sl.map(function (s) { return s.s; });
     var fast = Math.min.apply(null, paces), slow = Math.max.apply(null, paces);
+    var hasGap = foot && run.sl.some(function (s) { return s.gap; });
     var rows = run.sl.map(function (s) {
-      var frac = slow === fast ? 1 : 0.25 + 0.75 * (slow - s.s) / (slow - fast);
-      var cls = s.hr ? zoneColor(zoneOf(s.hr)) : 's0';
-      return '<div class="split"><span class="km">' + s.km + '</span>' +
-        '<span class="sbar"><i class="' + cls + '" style="width:' + (frac * 100).toFixed(1) + '%"></i></span>' +
-        '<span class="sp">' + pace(s.s) + '</span><span class="sh">' + (s.hr || '-') + '</span></div>';
+      var frac = slow === fast ? 1 : 0.3 + 0.7 * (slow - s.s) / (slow - fast);
+      var z = s.hr ? zoneOf(s.hr) : 'nohr';
+      return '<div class="split' + (s.s === fast ? ' fastest' : '') + '"><span class="km">' + s.km + '</span>' +
+        '<span class="sbar"><i style="width:' + (frac * 100).toFixed(1) + '%"></i></span>' +
+        '<span class="sp">' + (foot ? pace(s.s) : (3600 / s.s).toFixed(1)) + '</span>' +
+        (hasGap ? '<span class="sg">' + (s.gap ? pace(s.gap) : '') + '</span>' : '') +
+        '<span class="su">' + (s.up ? '+' + s.up : '') + '</span>' +
+        '<span class="sh"><i class="dot" style="background:var(--z-' + z + ')"></i>' + (s.hr || '-') + '</span></div>';
     }).join('');
-    return '<section class="card"><h2>Kilometre splits</h2><div class="splits">' + rows +
-      '</div><p class="hint">Bar length is relative pace; colour is the heart-rate zone for that kilometre.</p></section>';
+    return '<section class="card"><h2>Splits</h2><div class="splits"><div class="split head"><span class="km">km</span>' +
+      '<span class="sbar"></span><span class="sp">' + (foot ? 'Pace' : 'km/h') + '</span>' +
+      (hasGap ? '<span class="sg">GAP</span>' : '') + '<span class="su">Elev</span><span class="sh">HR</span></div>' + rows +
+      '</div><p class="hint">' + (hasGap ? 'GAP is grade-adjusted pace: the pace that effort would have given on the flat ' +
+      '(an estimate from the climb, the way Strava does it). ' : '') + 'The dot is the heart-rate zone for that kilometre.</p></section>';
   }
 
   function chartsBlock(run) {
     if (!run.hs || !run.hs.length) {
-      return '<section class="card"><h2>Heart rate</h2><p class="sub">No heart-rate detail stored for this ' +
-        'run yet. The hourly update fetches a few runs at a time.</p></section>';
+      if (!run.sp || !run.sp.length) {
+        return '<section class="card"><h2>During the activity</h2><p class="sub">No detail stored for this ' +
+          'one yet. The hourly update fetches a batch at a time, newest first.</p></section>';
+      }
     }
-    return '<section class="card"><h2>During the run</h2>' +
+    var cad = (run.cd || []).some(function (v) { return v; }) && isRun(run);
+    return '<section class="card"><h2>During the ' + (isRun(run) ? 'run' : 'activity') + '</h2>' +
       '<p class="readout" id="readout">Slide along the charts to read any point · tap to open</p>' +
       '<div class="charts" id="charts"></div>' +
       '<p class="hint">The marker on the map follows your finger. Open the charts to zoom into a single ' +
-      'interval.' + ((run.cd || []).some(function (v) { return v; }) ? ' Cadence dots are red under ' + CAD_LOW +
-      ' steps a minute, amber up to ' + CAD_GOOD + ' and green above - it rises with speed, so easy running ' +
-      'sits lower than threshold.' : '') + '</p></section>';
+      'interval.' + (cad ? ' Cadence dots are red under ' + CAD_LOW + ' steps a minute, amber up to ' + CAD_GOOD +
+      ' and green above - it rises with speed, so easy running sits lower than threshold.' : '') + '</p></section>';
+  }
+
+  // Strava's best efforts inside this run, with its PR medals.
+  function bestBlock(run) {
+    if (!run.be || !run.be.length) return '';
+    var medal = { 1: 'PR', 2: '2nd', 3: '3rd' };
+    var rows = run.be.map(function (e) {
+      return '<div class="best"><span class="bn">' + esc(e.n) + '</span><span class="bt">' + hms(e.s) + '</span>' +
+        '<span class="bp">' + pace(e.s / (e.m / 1000)) + ' /km</span>' +
+        (medal[e.pr] ? '<span class="medal m' + e.pr + '">' + medal[e.pr] + '</span>' : '<span></span>') + '</div>';
+    }).join('');
+    return '<section class="card"><h2>Best efforts</h2><div class="bests">' + rows + '</div>' +
+      '<p class="hint">The fastest stretch of each distance inside this run. PR, 2nd and 3rd are your all-time ' +
+      'ranking at the time, from Strava.</p></section>';
+  }
+
+  // Every run on the same route: this one against the others over time.
+  function routeBlock(run) {
+    if (!run.rg || !onFoot(run)) return '';
+    var same = runs.filter(function (r) { return r.rg === run.rg && r.m && r.s; });
+    if (same.length < 2) return '';
+    var fastest = same.slice().sort(function (a, b) { return a.s / a.m - b.s / b.m; })[0];
+    return '<section class="card"><h2>This route <span class="h2sub">run ' + same.length + ' times</span></h2>' +
+      '<div class="pc" id="routechart"></div>' +
+      '<p class="hint">Pace on every run of this route; this one is ringed. Fastest: ' +
+      pace(fastest.s / (fastest.m / 1000)) + ' /km on ' + dateText(fastest.dt).split(' · ')[0] +
+      (fastest.id === run.id ? ' - this one.' : '.') + ' Heart rate says whether a faster day was fitness or just effort.</p></section>';
+  }
+  function routeSpec(run) {
+    var same = runs.filter(function (r) { return r.rg === run.rg && r.m && r.s; }).slice().reverse();
+    var pts = same.map(function (r) {
+      return [r.dt.slice(0, 10), r.s / (r.m / 1000), esc(r.n) + '|' + dateText(r.dt).split(' · ')[0] + '|' +
+        pace(r.s / (r.m / 1000)) + ' /km' + (r.hr ? ' at ' + r.hr + ' bpm' : '')];
+    });
+    var sp = trendSpec(pts, 'Pace on this route', pace, { invert: true, steps: [5, 10, 15, 30, 60] });
+    if (!sp) return null;
+    var me = pts.filter(function (p, i) { return same[i].id === run.id; })[0];
+    if (me) sp.layers.push({ type: 'dots', r: 6, pts: [{ x: dayNum(me[0]), y: me[1], cls: 'recent' }] });
+    return sp;
+  }
+
+  // Pick another activity and lay it over this one.
+  function compareCandidates(run) {
+    var pool = acts.filter(function (a) { return a.id !== run.id && a.ty === run.ty && (a.t || a.x); });
+    // a threshold session is best compared with the same session; anything else with the same route
+    var score = function (a) {
+      var route = run.rg && a.rg === run.rg, kind = run.k && a.k === run.k, reps = kind && run.rn && a.rn === run.rn;
+      if (run.k === 'threshold') return reps ? 0 : kind ? 1 : route ? 2 : 3;
+      return route && kind ? 0 : route ? 1 : kind ? 2 : 3;
+    };
+    return pool.sort(function (a, b) { return score(a) - score(b) || (a.dt < b.dt ? 1 : -1); }).slice(0, 40);
+  }
+  function compareBlock(run) {
+    if (!run.t || !run.t.length) return '';
+    var list = compareCandidates(run);
+    if (!list.length) return '';
+    return '<section class="card" id="cmpcard"><h2>Compare</h2>' +
+      '<label class="field"><span>With</span><select id="cmpwith">' + list.map(function (a) {
+        return '<option value="' + a.id + '">' + dateText(a.dt).split(' · ')[0].replace(/^\w+ /, '') + ' · ' + esc(a.n) +
+          ' · ' + (a.m / 1000).toFixed(1) + ' km' + (a.rg && a.rg === run.rg ? ' · same route' : '') + '</option>';
+      }).join('') + '</select></label><div id="cmpbody"><p class="sub">Loading…</p></div></section>';
+  }
+  function compareTable(a, b) {
+    var foot = onFoot(a);
+    var rowsDef = [
+      ['Distance', function (x) { return x.m / 1000; }, function (v) { return v.toFixed(2) + ' km'; }, 0],
+      ['Moving time', function (x) { return x.s; }, hms, 0],
+      [foot ? 'Pace' : 'Speed', function (x) { return foot ? x.s / (x.m / 1000) : x.m / x.s * 3.6; },
+        foot ? pace : function (v) { return v.toFixed(1) + ' km/h'; }, foot ? -1 : 1],
+      ['GAP', function (x) { return x.gap; }, pace, -1],
+      ['Avg heart rate', function (x) { return x.hr; }, function (v) { return Math.round(v) + ' bpm'; }, 0],
+      ['Reps', function (x) { return x.rs && x.rs.n; }, function (v) { return v; }, 0],
+      ['Rep pace', function (x) { return x.rs && x.rs.pace; }, pace, -1],
+      ['Rep heart rate', function (x) { return x.rs && x.rs.hr; }, function (v) { return v + ' bpm'; }, 0],
+      ['Climb', function (x) { return x.up; }, function (v) { return v + ' m'; }, 0],
+      ['Effort', function (x) { return x.re; }, function (v) { return v; }, 0]
+    ];
+    var rows = rowsDef.map(function (r) {
+      var va = r[1](a), vb = r[1](b);
+      if (!va && !vb) return '';
+      var better = va && vb && r[3] ? (r[3] < 0 ? va < vb : va > vb) : null;
+      return '<tr><td>' + r[0] + '</td><td class="num' + (better ? ' better' : '') + '">' + (va ? r[2](va) : '-') +
+        '</td><td class="num">' + (vb ? r[2](vb) : '-') + '</td></tr>';
+    }).join('');
+    return '<div class="scroll"><table class="cmp"><tr><th></th><th>This one</th><th>' +
+      esc(dateText(b.dt).split(' · ')[0].replace(/^\w+ /, '')) + '</th></tr>' + rows + '</table></div>';
+  }
+  function drawCompare(run, other) {
+    var body = document.getElementById('cmpbody');
+    if (!body) return;
+    body.innerHTML = compareTable(run, other) + '<div class="charts" id="cmpcharts"></div>' +
+      '<p class="hint">Solid: this one. Dashed grey: the other. Tap the charts to open them and zoom.</p>';
+    var box = document.getElementById('cmpcharts');
+    var specs = runSpecs(run, other).filter(function (sp) { return sp.key === 'hr' || sp.key === 'pace'; });
+    box.innerHTML = specs.map(chartBlock).join('') + '<div class="cgrab"></div>';
+    var plots = specs.map(function (sp, i) {
+      var p = new Plot(box.querySelectorAll('.cv')[i], sp);
+      watchSize(p); p.draw(); return p;
+    });
+    hands(box.querySelector('.cgrab'), plots, { tap: function () {
+      openChartWindow(esc(run.n) + ' vs ' + esc(dateText(other.dt).split(' · ')[0]), function (stack) {
+        var sp2 = runSpecs(run, other).filter(function (sp) { return sp.key === 'hr' || sp.key === 'pace'; });
+        stack.innerHTML = sp2.map(chartBlock).join('');
+        return { plots: sp2.map(function (sp, i) { var p = new Plot(stack.querySelectorAll('.cv')[i], sp); p.headH = 26; return p; }) };
+      });
+    } });
+  }
+  function wireCompare(run) {
+    var sel = document.getElementById('cmpwith');
+    if (!sel) return;
+    var go = function () {
+      var other = byId[sel.value];
+      document.getElementById('cmpbody').innerHTML = '<p class="sub">Loading…</p>';
+      loadDetail(other).then(function (o) { if (current === run) drawCompare(run, o); })
+        .catch(function () {
+          document.getElementById('cmpbody').innerHTML = '<p class="sub">Could not load that one - are you offline?</p>';
+        });
+    };
+    sel.addEventListener('change', go);
+    go();
+  }
+
+  // The coach's verdict, and how the run matched the planned session.
+  function coachBlock(run) {
+    var check = window.planCheck ? planCheck(run) : null;
+    if (!run.coach && !check) return '';
+    var rows = check && check.rows.length ? '<div class="pvd"><div class="pvd-row head"><span></span><span>Planned</span>' +
+      '<span>Done</span></div>' + check.rows.map(function (r) {
+        return '<div class="pvd-row ' + (r.ok === true ? 'pv-ok' : r.ok === false ? 'pv-off' : '') + '"><span>' + r.what + '</span>' +
+          '<span>' + esc(r.planned) + '</span><span>' + esc(r.done) + '<i>' + (r.ok === true ? '✓' : r.ok === false ? '!' : '') +
+          '</i></span></div>';
+      }).join('') + '</div>' : '';
+    return '<section class="card coachcard"><h2>Coach</h2>' +
+      (check ? '<p class="plannedas">Planned: <a href="#/plan">' + esc(check.session.title) + '</a></p>' : '') + rows +
+      (run.coach ? '<p class="note-coach">' + esc(run.coach) + '</p>' : '') + '</section>';
   }
 
   // ---------- the map preview on the run page ----------
@@ -304,25 +521,24 @@
     if (explorerOpen) explorerOpen();
   }
 
-  window.showRun = function (id) {
-    leaveRun();
-    var run = byId[id];
-    current = run || null;
-    if (!run) {
-      host.innerHTML = '<section class="card"><p class="sub">That run is not in the last 140 days.</p></section>';
-      return;
-    }
-    document.title = 'Trening · ' + run.n;
-    var geo = routeGeo(run);
-    host.innerHTML =
-      '<span class="typechip" style="--zc:var(--z-' + (run.z === 'nohr' ? 'nohr' : run.z) + ')"><i></i>' +
-      conf.names[run.z] + '</span>' +
+  function header(run) {
+    var check = window.planCheck && run.t ? planCheck(run) : null;
+    return '<span class="typechip" style="--zc:' + kindColour(run) + '"><i></i>' + esc(kindName(run)) +
+      (run.rn ? ' · ' + run.rn + ' reps' : '') + '</span>' +
+      (tooHard(run) ? ' <span class="pill warn">grey zone</span>' : '') +
       '<h1 class="runtitle">' + esc(run.n) + '</h1>' +
-      '<p class="sub">' + dateText(run.dt) + '</p>' +
+      '<p class="sub">' + dateText(run.dt) + (check ? ' · planned: ' + esc(check.session.title) : '') + '</p>' +
+      (run.desc ? '<p class="desc-quote">' + esc(run.desc) + '</p>' : '');
+  }
+
+  function drawRun(run) {
+    var geo = routeGeo(run);
+    host.innerHTML = header(run) +
       '<section class="card nopad">' + (geo ? mapCard(run) : '') + statGrid(run) + '</section>' +
-      chartsBlock(run) + lapsBlock(run) + splitsBlock(run) + zoneBlock(run) + notesBlock(run) +
+      coachBlock(run) + chartsBlock(run) + (isRun(run) ? repsBlock(run) : '') + splitsBlock(run) + zoneBlock(run) +
+      bestBlock(run) + routeBlock(run) + compareBlock(run) + notesBlock(run) +
       '<p class="hint"><a href="https://www.strava.com/activities/' + run.id +
-      '" target="_blank" rel="noopener">Open this run on Strava ↗</a></p>';
+      '" target="_blank" rel="noopener">Open on Strava ↗</a></p>';
 
     if (geo) {
       var card = document.getElementById('runmap');
@@ -339,17 +555,63 @@
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openExplorer(run, false); }
       });
     }
-
     var box = document.getElementById('charts');
     if (box) {
       runCharts(box, document.getElementById('readout'), run, function (j) {
         if (preview) preview.showAt(j == null ? null : fractionOfSample(run, j));
       });
     }
+    smallChart('repchart', run.reps && run.reps.length >= 2 ? repSpec(run) : null, 'Reps');
+    smallChart('routechart', run.rg ? routeSpec(run) : null, 'This route');
+    wireCompare(run);
     wireNotes(run);
+  }
+
+  // A small chart in a card that opens full screen when tapped.
+  function smallChart(id, spec, title) {
+    var el = document.getElementById(id);
+    if (!el || !spec) { if (el) el.hidden = true; return; }
+    el.innerHTML = '<div class="cv"></div><div class="cgrab" role="button" tabindex="0" aria-label="Open ' + title + '"></div>';
+    var p = new Plot(el.querySelector('.cv'), spec);
+    watchSize(p); p.draw();
+    var read = function (q, px, py, cx, cy, touch) { readPoint(q, px, py, cx, cy, touch); };
+    hands(el.querySelector('.cgrab'), [p], {
+      touchRead: false, probe: read, leave: function () { p.mark(''); tipAt(null); },
+      tap: function () {
+        tipAt(null);
+        openChartWindow(title, function (stack) {
+          stack.innerHTML = '<div class="cv"></div>';
+          var q = new Plot(stack.querySelector('.cv'), spec);
+          q.reset();
+          return { plots: [q], maxH: 460, probe: read, leave: function () { q.mark(''); tipAt(null); } };
+        });
+      }
+    });
+  }
+
+  window.showRun = function (id) {
+    leaveRun();
+    var run = byId[id];
+    current = run || null;
+    if (!run) {
+      host.innerHTML = '<section class="card"><p class="sub">That activity is not here - it may have been deleted on Strava.</p></section>';
+      return;
+    }
+    document.title = 'Trening · ' + run.n;
+    if (run.x && !run.t) {
+      host.innerHTML = header(run) + '<section class="card nopad">' + statGrid(run) + '</section>' +
+        '<section class="card"><p class="sub" id="detailwait">Loading the detail…</p></section>';
+      loadDetail(run).then(function () { if (current === run) drawRun(run); }).catch(function () {
+        var el = document.getElementById('detailwait');
+        if (el && current === run) {
+          el.textContent = 'Could not load the detail of this one - it needs a connection the first time it is opened.';
+        }
+      });
+    } else {
+      drawRun(run);
+    }
     pullNotes().then(function () {
-      var note = NOTES[run.id];
-      var field = document.getElementById('notetext');
+      var note = NOTES[run.id], field = document.getElementById('notetext');
       if (field && note && !field.value && document.getElementById('run').classList.contains('on')) {
         field.value = note.text || '';
       }

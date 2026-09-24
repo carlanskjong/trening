@@ -8,46 +8,58 @@
    * Routes every run as its own line, coloured by the kind of session.
    * Tap any route (in either view) to see which run it was and open it.
    * ================================================================ */
-  var KIND_NAMES = { easy: 'Easy', long: 'Long', threshold: 'Threshold' };
-  var KIND_ZONE = { easy: 'easy', long: 'easy', threshold: 'threshold' };
-  var PERIODS = [{ id: '28', name: '4 weeks' }, { id: '91', name: '3 months' }, { id: 'all', name: 'All' }];
+  // What a route is coloured by on the Routes view: the session for runs, the sport otherwise.
+  function groupOf(a) {
+    if (a.k) return a.k === 'threshold' ? 'threshold' : a.k === 'race' ? 'race' : 'easy';
+    return a.ty === 'Hike' || a.ty === 'Walk' ? 'foot' : /Ride/.test(a.ty) ? 'ride' : 'other';
+  }
+  var GROUP_INK = { easy: '--z-easy', threshold: '--z-threshold', race: '--z-hard', foot: '--c-elev', ride: '--bar', other: '--bar' };
+  var GROUP_NAME = { easy: 'Easy & long', threshold: 'Threshold', race: 'Race', foot: 'Hikes & walks', ride: 'Rides', other: 'Other' };
 
   var mapPage = window.mapPage = (function () {
     var el = document.getElementById('mappage');
     if (!el) return null;
     var state = {
-      mode: prefs.get('mapmode', 'heat'), period: prefs.get('mapperiod', 'all'), kind: 'all',
+      mode: prefs.get('mapmode', 'heat'), period: prefs.get('mapperiod', 'all'), kind: prefs.get('mapkind', 'runs'),
       basemap: null, three: false
     };
     var map = null, loading = null, shown = [], selected = null;
 
     function chosen() {
       var cut = state.period === 'all' ? '' : addDays(TODAY, -(+state.period));
-      return runs.filter(function (r) {
-        return routeGeo(r) && (!cut || r.dt.slice(0, 10) >= cut) && (state.kind === 'all' || r.k === state.kind);
+      return acts.filter(function (r) {
+        if (!r.poly || (cut && r.dt.slice(0, 10) < cut)) return false;
+        var k = state.kind, g = groupOf(r);
+        var fits = k === 'all' || (k === 'runs' ? isRun(r) : k === 'foot' || k === 'ride' ? g === k : r.k === k);
+        return fits && routeGeo(r);
       });
     }
 
     // Points every ~20 m along a route, for the density layer.
+    // Points every ~20 m along a route; further apart when years of routes would
+    // otherwise make hundreds of thousands of them (phones slow down).
     var pointCache = {};
-    function pointsOf(r) {
-      if (pointCache[r.id]) return pointCache[r.id];
-      var g = routeGeo(r), out = [], step = 20;
+    function pointsOf(r, step) {
+      var key = r.id + ':' + step;
+      if (pointCache[key]) return pointCache[key];
+      var g = routeGeo(r), out = [];
       for (var i = 1; i < g.coords.length; i++) {
         var seg = g.cum[i] - g.cum[i - 1], a = g.coords[i - 1], b = g.coords[i];
         var n = Math.max(1, Math.round(seg / step));
         for (var k = 0; k < n; k++) out.push([a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n]);
       }
-      return (pointCache[r.id] = out);
+      return (pointCache[key] = out);
     }
 
     function data() {
       shown = chosen();
-      var lines = [], pts = [];
+      var lines = [], pts = [], total = 0;
+      shown.forEach(function (r) { total += routeGeo(r).total; });
+      var step = Math.max(20, Math.round(total / 180000 / 10) * 10);
       shown.forEach(function (r) {
-        lines.push({ type: 'Feature', id: r.id, properties: { id: r.id, kind: r.k },
+        lines.push({ type: 'Feature', id: r.id, properties: { id: r.id, kind: groupOf(r) },
           geometry: { type: 'LineString', coordinates: routeGeo(r).coords } });
-        pointsOf(r).forEach(function (c) { pts.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } }); });
+        pointsOf(r, step).forEach(function (c) { pts.push({ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: c } }); });
       });
       return { lines: { type: 'FeatureCollection', features: lines }, pts: { type: 'FeatureCollection', features: pts } };
     }
@@ -88,7 +100,9 @@
       map.addLayer({ id: 'routes', type: 'line', source: 'all-lines',
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
-          'line-color': ['match', ['get', 'kind'], 'threshold', zoneInk('threshold'), 'long', zoneInk('easy'), zoneInk('easy')],
+          'line-color': ['match', ['get', 'kind']].concat([].concat.apply([], Object.keys(GROUP_INK).map(function (k) {
+            return [k, cssVar(GROUP_INK[k]) || '#888'];
+          })), ['#888']),
           'line-width': ['interpolate', ['linear'], ['zoom'], 9, 1.6, 14, 3.2],
           'line-opacity': ['case', ['boolean', ['feature-state', 'dim'], false], 0.18, 0.8]
         } });
@@ -153,8 +167,8 @@
     function stats() {
       var km = shown.reduce(function (a, r) { return a + r.m; }, 0) / 1000;
       el.querySelector('.mp-stats').textContent = shown.length
-        ? shown.length + ' run' + (shown.length === 1 ? '' : 's') + ' · ' + Math.round(km) + ' km'
-        : 'No runs with a route in this period';
+        ? shown.length + ' activit' + (shown.length === 1 ? 'y' : 'ies') + ' · ' + Math.round(km).toLocaleString('en-GB').replace(/,/g, ' ') + ' km'
+        : 'Nothing with a route in this period';
     }
     function legend() {
       var lg = el.querySelector('.mlegend');
@@ -162,9 +176,10 @@
         lg.innerHTML = '<span class="lg-title">Heat</span><b>Once</b><i class="lg-bar" style="background:linear-gradient(90deg,' +
           heatRamp().slice(1).join(',') + ')"></i><b>Often</b>';
       } else {
-        lg.innerHTML = '<span class="lg-title">Session</span>' + ['easy', 'threshold'].map(function (k) {
-          return '<span class="lg-item"><i style="background:' + zoneInk(k) + '"></i>' +
-            (k === 'easy' ? 'Easy & long' : 'Threshold') + '</span>';
+        var present = {};
+        shown.forEach(function (r) { present[groupOf(r)] = 1; });
+        lg.innerHTML = Object.keys(GROUP_INK).filter(function (k) { return present[k]; }).map(function (k) {
+          return '<span class="lg-item"><i style="background:' + cssVar(GROUP_INK[k]) + '"></i>' + GROUP_NAME[k] + '</span>';
         }).join('');
       }
       lg.hidden = false;
@@ -185,12 +200,13 @@
       map.setFilter('picked', ['==', ['get', 'id'], id]);
       map.setFilter('picked-top', ['==', ['get', 'id'], id]);
       var card = el.querySelector('.mp-card');
-      card.style.setProperty('--zc', 'var(--z-' + KIND_ZONE[r.k] + ')');
-      card.innerHTML = '<div class="mpc-body"><span class="typechip"><i></i>' + KIND_NAMES[r.k] + '</span>' +
+      card.style.setProperty('--zc', kindColour(r));
+      card.innerHTML = '<div class="mpc-body"><span class="typechip"><i></i>' + esc(kindName(r)) + '</span>' +
         '<b>' + esc(r.n) + '</b><span class="mpc-when">' + dateText(r.dt).split(' · ')[0] + '</span>' +
         '<span class="mpc-nums"><span><b>' + (r.m / 1000).toFixed(1) + '</b> km</span><span><b>' +
-        pace(r.s / (r.m / 1000)) + '</b> /km</span>' + (r.hr ? '<span><b>' + r.hr + '</b> bpm</span>' : '') + '</span></div>' +
-        '<div class="mpc-act"><a class="btn small" href="#/run/' + r.id + '">Open run</a>' +
+        (onFoot(r) ? pace(r.s / (r.m / 1000)) + '</b> /km' : (r.m / r.s * 3.6).toFixed(1) + '</b> km/h') + '</span>' +
+        (r.hr ? '<span><b>' + r.hr + '</b> bpm</span>' : '') + '</span></div>' +
+        '<div class="mpc-act"><a class="btn small" href="#/run/' + r.id + '">Open</a>' +
         '<button type="button" class="mbtn small" data-act="unpick" aria-label="Close">' + micon('close') + '</button></div>';
       card.hidden = false;
       if (animate) {
@@ -265,7 +281,7 @@
       if (b.dataset.period) {
         state.period = b.dataset.period; prefs.set('mapperiod', state.period); markChoices(); refreshData(); fit(true); return;
       }
-      if (b.dataset.kind) { state.kind = b.dataset.kind; markChoices(); refreshData(); return; }
+      if (b.dataset.kind) { state.kind = b.dataset.kind; prefs.set('mapkind', state.kind); markChoices(); refreshData(); fit(true); return; }
       if (b.dataset.basemap) {
         state.basemap = b.dataset.basemap; prefs.set('heatmap-base', state.basemap); menu.hidden = true; markChoices();
         if (map) map.setStyle(styleFor(state.basemap), { diff: false });
@@ -284,7 +300,12 @@
     });
 
     return {
-      show: function () { build(); if (map) setTimeout(function () { map.resize(); }, 0); },
+      show: function () {
+        build();
+        if (map) setTimeout(function () { map.resize(); }, 0);
+        // the whole history's routes, once per visit
+        loadRoutes().then(function () { if (map) { refreshData(); if (!selected) fit(true); } }).catch(function () {});
+      },
       hide: function () {
         if (!map) return;
         try { map.remove(); } catch (e) {}

@@ -16,15 +16,27 @@
     race: { name: 'Race', short: 'Race', zone: 'hard' },
     other: { name: 'Other', short: 'Other', zone: 'nohr' }
   };
-  var DAYS_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September',
-    'October', 'November', 'December'];
 
   function targetFor(type) {
     var m = conf.maxhr;
     if (type === 'threshold') return Math.round(m * 0.82) + '–' + (Math.round(m * 0.88) - 1) + ' bpm';
     if (type === 'easy' || type === 'long') return 'under ' + Math.round(m * 0.75) + ' bpm';
     return '';
+  }
+  // Pace windows learned from his own runs (report.py -> analysis.pace_targets).
+  function paceFor(type) {
+    var t = conf.targets || {}, w = type === 'threshold' ? t.threshold : (type === 'easy' || type === 'long') ? t.easy : null;
+    return w ? pace(w.lo) + '–' + pace(w.hi) : '';
+  }
+  function targetBox(type) {
+    var hr = targetFor(type), p = paceFor(type);
+    if (!hr) return '';
+    var why = !p ? '' : type === 'threshold'
+      ? 'Pace from your last ' + conf.targets.threshold.reps + ' reps at threshold heart rate. Heart rate still decides - on a windy or tired day, run slower.'
+      : 'What easy has looked like for you lately. Hills or a tired day make it slower - that is right.';
+    return '<div class="nx-target"><div><span class="lab">Heart rate</span><span class="big">' + hr + '</span></div>' +
+      (p ? '<div><span class="lab">Pace</span><span class="big">' + p + '<small> /km</small></span></div>' : '') + '</div>' +
+      (why ? '<p class="nx-why">' + why + '</p>' : '');
   }
   function dm(s) { var d = parseYmd(s); return pad(d.getDate()) + '.' + pad(d.getMonth() + 1); }
   function dayName(s) { return conf.days[weekdayOf(s)]; }
@@ -274,8 +286,7 @@
       html = '<div class="nx-top"><span class="typechip"><i></i>' + t.name + '</span>' +
         '<span class="nx-when">' + whenWord(next.date) + ' · ' + dm(next.date) + '</span>' +
         '<span class="pill' + (today ? ' hot' : '') + '">' + (today ? 'Today' : 'Next up') + '</span></div>' +
-        '<h3 class="nx-title">' + esc(next.title || t.name) + '</h3>' +
-        (target ? '<div class="nx-target"><span class="lab">Heart rate</span><span class="big">' + target + '</span></div>' : '') +
+        '<h3 class="nx-title">' + esc(next.title || t.name) + '</h3>' + (target ? targetBox(next.type) : '') +
         (next.detail ? '<p class="nx-detail">' + esc(next.detail) + '</p>' : '');
     } else {
       host.style.setProperty('--zc', 'var(--good)');
@@ -312,10 +323,178 @@
         '<span class="dlabel">' + lab + '</span><span class="dlabel wide">' + wide + '</span></a>';
     }
     strip.innerHTML = cells;
-    document.getElementById('homeweeksub').textContent = 'Week ' + isoWeek(monday) + ' · ' +
-      m.doneCount + ' of ' + m.required.length + ' sessions done' +
-      (m.extra.length ? ' · ' + m.extra.length + ' extra run' + (m.extra.length > 1 ? 's' : '') : '');
+    document.getElementById('homeweeksub').innerHTML = ring(m.doneCount, m.required.length) +
+      '<span><b>' + m.doneCount + ' of ' + m.required.length + ' sessions</b> done in week ' + isoWeek(monday) +
+      (m.extra.length ? '<br>+ ' + m.extra.length + ' extra run' + (m.extra.length > 1 ? 's' : '') : '') + '</span>';
+    drawReview();
+    drawRace();
   }
+
+  // A ring that fills as the week's sessions get done.
+  function ring(done, total) {
+    var r = 17, c = 2 * Math.PI * r, f = total ? Math.min(1, done / total) : 0;
+    return '<svg class="ring" viewBox="0 0 44 44" aria-hidden="true"><circle cx="22" cy="22" r="' + r + '" class="ring-bg"/>' +
+      '<circle cx="22" cy="22" r="' + r + '" class="ring-fg' + (f >= 1 ? ' full' : '') + '" stroke-dasharray="' +
+      (c * f).toFixed(1) + ' ' + c.toFixed(1) + '" transform="rotate(-90 22 22)"/>' +
+      '<text x="22" y="26.5" text-anchor="middle">' + done + '/' + total + '</text></svg>';
+  }
+
+  /* ---------------- last week in review ---------------- */
+  function weekNumbers(monday) {
+    var list = weekRuns(monday), n = { km: 0, secs: 0, thr: 0, easy: 0, hrTime: 0, effort: 0, rpe: [] };
+    list.forEach(function (r) {
+      n.km += r.m / 1000; n.secs += r.s; n.effort += r.re || 0;
+      var zs = r.zs || {};
+      n.thr += (zs.threshold || 0) + (zs.hard || 0);
+      n.easy += zs.easy || 0;
+      n.hrTime += (zs.easy || 0) + (zs.moderate || 0) + (zs.threshold || 0) + (zs.hard || 0);
+      var note = NOTES[r.id];
+      if (note && +note.rpe) n.rpe.push(+note.rpe);
+    });
+    n.runs = list.length;
+    return n;
+  }
+  function drawReview() {
+    var host = document.getElementById('homereview');
+    if (!host) return;
+    var monday = addDays(mondayOf(TODAY), -7), m = matchWeek(monday), n = weekNumbers(monday);
+    if (!m.required.length && !n.runs) { host.hidden = true; return; }
+    var before = [1, 2, 3].map(function (k) { return weekNumbers(addDays(monday, -7 * k)).effort; });
+    var usual = before.reduce(function (a, b) { return a + b; }, 0) / 3;
+    var share = n.hrTime ? Math.round(n.easy / n.hrTime * 100) : null;
+    var missed = m.required.filter(function (s) { return !m.done[s.id]; }).length;
+    var say = [];
+    if (missed) say.push(missed + ' session' + (missed > 1 ? 's' : '') + ' missed. Do not double up to catch up - carry on with this week as planned.');
+    if (share !== null && share < 70) say.push('Only ' + share + '% of the running was easy. Slow the easy runs down this week - they are what lets the threshold work pay off.');
+    if (usual && n.effort > usual * 1.3) say.push('A heavy week against the three before it. Keep this week\'s easy runs truly easy.');
+    if (!say.length) {
+      say.push(m.required.length && !missed ? 'A complete week' + (share !== null && share >= 75 ? ', and the easy running stayed easy' : '') +
+        '. Keep doing exactly this.' : 'A steady week.');
+    }
+    var rpe = n.rpe.length ? (n.rpe.reduce(function (a, b) { return a + b; }, 0) / n.rpe.length).toFixed(1) : null;
+    host.hidden = false;
+    host.innerHTML = '<h2>Last week <span class="h2sub">week ' + isoWeek(monday) + '</span></h2>' +
+      '<div class="review">' +
+      '<div><span class="m">' + m.doneCount + '/' + m.required.length + '</span><span class="u">sessions</span></div>' +
+      '<div><span class="m">' + n.km.toFixed(1) + '</span><span class="u">km</span></div>' +
+      '<div><span class="m">' + Math.round(n.thr / 60) + '</span><span class="u">min at threshold</span></div>' +
+      '<div><span class="m">' + (share === null ? '–' : share + '%') + '</span><span class="u">easy</span></div>' +
+      '<div><span class="m">' + Math.round(n.effort) + '</span><span class="u">effort' + (usual ? ' · usual ' + Math.round(usual) : '') + '</span></div>' +
+      (rpe ? '<div><span class="m">' + rpe + '</span><span class="u">felt (1–10)</span></div>' : '') +
+      '</div><p class="note-coach">' + say.join(' ') + '</p>';
+  }
+
+  /* ---------------- the race goal ---------------- */
+  function drawRace() {
+    var host = document.getElementById('homerace'), race = conf.race;
+    if (!host) return;
+    if (!race || race.date < TODAY) { host.hidden = true; return; }
+    var days = daysBetween(TODAY, race.date), p = race.predicted;
+    var km = race.m / 1000;
+    host.hidden = false;
+    host.innerHTML = '<div class="race-top"><span class="eyebrow">Race goal</span><span class="pill">' +
+      (days === 0 ? 'Today!' : days + ' day' + (days > 1 ? 's' : '') + ' to go') + '</span></div>' +
+      '<h3 class="nx-title">' + esc(race.name) + '</h3><p class="sub tight">' + dateText(race.date + 'T00:00').split(' · ')[0] +
+      ' · ' + (km % 1 ? km.toFixed(1) : km) + ' km</p><div class="review">' +
+      (p ? '<div><span class="m">' + hms(p.s) + '</span><span class="u">predicted · ' + pace(p.s / km) + ' /km</span></div>' : '') +
+      (race.goal ? '<div><span class="m">' + hms(race.goal) + '</span><span class="u">your goal · ' + pace(race.goal / km) + ' /km</span></div>' : '') +
+      '</div>' + (p ? '<p class="hint">Predicted from your ' + esc(p.from) + ' of ' + hms(p.from_s) + ' (' +
+      p.date.split('-').reverse().join('.') + ') with Riegel\'s formula. It tends to be optimistic for longer races ' +
+      'until the long runs have built up - treat it as a best case.</p>' : '<p class="hint">A prediction appears once ' +
+      'a recent run has a best effort of 1 km or more.</p>');
+  }
+
+  /* ---------------- planned against done ----------------
+   * Reads the plan's own words ("5×6 min", "20×1 min, p: 30 sek",
+   * "10×(45/15)", "2×(8×(45/15))", "10 + 5×(45/15) + 5" = warm-up, 5 reps, cool-down, "(7–6–5–4–3–2–1 min)", "15 min
+   * sammenhengende terskel", "75–80 min rolig") into reps and work time, and
+   * lays the run's detected reps beside them.
+   * -------------------------------------------------------- */
+  function parsePlan(text) {
+    var t = String(text || '').replace(/[–—]/g, '-').replace(/(\d)\s*[xX]\s*(?=[(\d])/g, '$1×');
+    // His shorthand: a bare number before or after a '+' is warm-up or cool-down minutes,
+    // so '10 + 5×(45/15) + 5' is five reps. Drop those before counting.
+    t = t.replace(/(^|\+)\s*\d+\s*(?=\+)/g, '$1').replace(/\+\s*\d+\s*$/, '');
+    var out = { lo: 0, hi: 0, work: 0, durs: [] };
+    function add(nLo, nHi, secs) {
+      out.lo += nLo; out.hi += nHi; out.work += secs * (nLo + nHi) / 2; out.durs.push(secs);
+    }
+    // 2×(8×(45/15)): sets of short reps
+    t = t.replace(/(\d+)\s*×\s*\(\s*(\d+)(?:-(\d+))?\s*×\s*\(\s*(\d+)\s*\/\s*(\d+)\s*\)\s*\)/g, function (_, a, b, c, d) {
+      add(+a * +b, +a * +(c || b), +d); return ' ';
+    });
+    // ladders: (7-6-5-4-3-2-1 min), 2×(6-4-2 min), (40-40-30-30-20-20 sek)
+    t = t.replace(/(?:(\d+)\s*×\s*)?\(\s*(\d+(?:\s*-\s*\d+){2,})\s*(min|sek|s)\b[^)]*\)/g, function (_, n, list, unit) {
+      var k = +(n || 1), steps = list.split('-').map(function (x) { return +x * (unit === 'min' ? 60 : 1); });
+      steps.forEach(function (secs) { add(k, k, secs); });
+      return ' ';
+    });
+    // 10×(45/15), 20-25×(45/15)
+    t = t.replace(/(\d+)(?:-(\d+))?\s*×\s*\(\s*(\d+)\s*\/\s*(\d+)\s*\)/g, function (_, a, b, c) {
+      add(+a, +(b || a), +c); return ' ';
+    });
+    // 5×6 min, 4×(5 min terskel / 90 sek pause), 6×(2 min / 30 sek)
+    t = t.replace(/(\d+)(?:-(\d+))?\s*×\s*\(?\s*(\d+(?:[.,]\d+)?)\s*(min|sek|s)\b[^)+]*\)?/g, function (_, a, b, c, unit) {
+      add(+a, +(b || a), parseFloat(c.replace(',', '.')) * (unit === 'min' ? 60 : 1)); return ' ';
+    });
+    // one continuous block at threshold
+    t = t.replace(/(\d+)\s*min\s*(?:sammenhengende\s*)?(?:terskel|lavterskel|tempo)/gi, function (_, a) {
+      add(1, 1, +a * 60); return ' ';
+    });
+    var mins = /(\d+)(?:\s*-\s*(\d+))?\s*min/.exec(t);
+    out.minutes = mins ? [+mins[1], +(mins[2] || mins[1])] : null;
+    return out;
+  }
+
+  // The planned session this run completed, if any.
+  function planFor(run) {
+    if (!run || !isRun(run)) return null;
+    var m = matchWeek(mondayOf(run.dt.slice(0, 10)));
+    for (var i = 0; i < m.sessions.length; i++) if (m.done[m.sessions[i].id] === run) return m.sessions[i];
+    return null;
+  }
+  function mmss(secs) { return secs >= 3600 ? hms(secs) : Math.floor(secs / 60) + ':' + pad(Math.round(secs % 60)); }
+  function within(v, lo, hi, slack) { return v >= lo * (1 - slack) && v <= hi * (1 + slack); }
+
+  window.planCheck = function (run) {
+    var s = planFor(run);
+    if (!s) return null;
+    var rows = [], lo = Math.round(conf.maxhr * 0.82), hi = Math.round(conf.maxhr * 0.88) - 1, easyMax = Math.round(conf.maxhr * 0.75);
+    if (s.type === 'threshold') {
+      var p = parsePlan(s.title + ' ' + (s.detail || '')), rs = run.rs;
+      if (p.lo) {
+        var planned = p.lo === p.hi ? String(p.lo) : p.lo + '–' + p.hi;
+        rows.push({ what: 'Reps', planned: planned, done: rs ? String(rs.n) : 'not seen',
+                    ok: rs ? within(rs.n, p.lo, p.hi, p.hi >= 6 ? 0.1 : 0) || Math.abs(rs.n - p.lo) <= 1 : null });
+        rows.push({ what: 'Work', planned: mmss(p.work), done: rs ? mmss(rs.s) : '-',
+                    ok: rs ? within(rs.s, p.work, p.work, 0.18) : null });
+        var same = p.durs.every(function (d) { return d === p.durs[0]; });
+        if (same && rs) rows.push({ what: 'Each rep', planned: mmss(p.durs[0]), done: mmss(rs.avg_s),
+                                    ok: within(rs.avg_s, p.durs[0], p.durs[0], 0.2) });
+      }
+      if (rs && rs.hr) {
+        var reading = rs.short ? rs.hr_tail : rs.hr;
+        rows.push({ what: rs.short ? 'Heart rate (last reps)' : 'Heart rate', planned: lo + '–' + hi, done: reading + ' bpm',
+                    ok: rs.short ? (reading <= hi ? true : false) : reading >= lo - 2 && reading <= hi });
+      }
+      if (rs && rs.pace && paceFor('threshold')) {
+        var t = conf.targets.threshold;
+        rows.push({ what: 'Pace', planned: paceFor('threshold'), done: pace(rs.pace),
+                    ok: rs.pace >= t.lo - 8 && rs.pace <= t.hi + 8 ? true : null });
+      }
+      if (!rs) rows.push({ what: 'Reps', planned: '', done: 'No laps or clear reps found - press lap at each rep', ok: null });
+    } else if (s.type === 'easy' || s.type === 'long') {
+      var q = parsePlan(s.title), mins = run.s / 60;
+      if (q.minutes) {
+        rows.push({ what: 'Time', planned: q.minutes[0] === q.minutes[1] ? q.minutes[0] + ' min' : q.minutes[0] + '–' + q.minutes[1] + ' min',
+                    done: Math.round(mins) + ' min', ok: mins >= q.minutes[0] - 5 && mins <= q.minutes[1] + 10 });
+      }
+      if (run.hr) rows.push({ what: 'Heart rate', planned: 'under ' + easyMax, done: run.hr + ' bpm', ok: run.hr < easyMax });
+      if (paceFor(s.type)) rows.push({ what: 'Pace', planned: paceFor(s.type), done: pace(run.s / (run.m / 1000)), ok: null });
+    }
+    return { session: s, rows: rows };
+  };
+
 
   function drawAll() { drawCalendar(); drawHome(); }
 
@@ -378,7 +557,7 @@
       dayName(s.date) + ' ' + dm(s.date) + '</span>' +
       (run ? '<span class="pill ok-pill">Done ✓</span>' : s.opt ? '<span class="pill">Optional</span>'
         : s.date < TODAY ? '<span class="pill warn">Not done</span>' : '') + '</div>' +
-      (target ? '<div class="nx-target"><span class="lab">Heart rate</span><span class="big">' + target + '</span></div>' : '') +
+      (target ? targetBox(s.type) : '') +
       (s.detail ? '<p class="nx-detail">' + esc(s.detail) + '</p>' : '') +
       (run ? '<a class="xrun big" href="#/run/' + run.id + '" style="--zc:var(--z-' + (run.z === 'nohr' ? 'nohr' : run.z) + ')"><i></i>' +
         esc(run.n) + ' · ' + (run.m / 1000).toFixed(1) + ' km · ' + hms(run.s) + ' →</a>' : '') +
@@ -534,6 +713,14 @@
       resetPlan();
     });
     if (cal.view === 'month') cal.anchor = TODAY;
+  })();
+
+  // The plan's guide folds away once read; remember which way he left it.
+  (function () {
+    var guide = document.getElementById('planguide');
+    if (!guide) return;
+    guide.open = prefs.get('planguide', 'open') === 'open';
+    guide.addEventListener('toggle', function () { prefs.set('planguide', guide.open ? 'open' : 'shut'); });
   })();
 
   window.planPage = { refresh: drawAll };

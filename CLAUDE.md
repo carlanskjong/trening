@@ -24,22 +24,45 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
 - These values live in `config.json` / `report.py` / `training_plan.py`. Keep coaching claims honest; no lactate meter, so HR is the proxy.
 
 ## How the app works today
-- `build_site.py` – run by GitHub Actions. Refreshes the Strava token, fetches the last 140 days of activities,
-  collects per-run detail via `strava_cache.py`, reads his browser-written files (`notes.enc`, `settings.enc`,
-  `plan.enc`), renders HTML via `report.py`, **encrypts it with AES-GCM (PBKDF2-SHA256, 250k rounds)** using
-  `DASHBOARD_PASSWORD`, and writes `site/` (login shell, manifest, icons, `sw.js`, and `vendor/`).
-- `strava_cache.py` – streams (time, distance, HR, speed, altitude, **cadence**) trimmed to ~160 samples, plus
-  a seconds-per-bpm histogram, kilometre splits and laps, cached in **`cache/<activity id>.enc`** (AES, key
-  from `STRAVA_CLIENT_SECRET`; the repo is public) and committed by the workflow. Budget: **80 API calls per
-  build** – a new run costs 2 (streams + laps); a run cached before cadence existed (`cadv` missing) is topped up
-  with 1 call, after new runs. Stops early when Strava's rate-limit headers run low. Cadence is stored doubled
-  (Strava counts one foot).
+- `build_site.py` – run by GitHub Actions. Refreshes the Strava token, gets **the whole activity history,
+  every sport** (`strava_cache.activity_list`), collects per-activity detail (`strava_cache.collect`), reads his
+  browser-written files (`notes.enc`, `settings.enc`, `plan.enc`), renders via `report.render_site`, **encrypts
+  the page with AES-GCM (PBKDF2-SHA256, 250k rounds)** using `DASHBOARD_PASSWORD`, and writes `site/` (login
+  shell, manifest, icons, `sw.js`, `vendor/`) plus **side files**: `a/<id>.bin` (detail of each activity older
+  than 140 days) and `routes.bin` (every route). Side files are `IV + AES-GCM(JSON)` under one key per password
+  (`side_key()`: PBKDF2 with a salt derived from the password, so a cached side file stays readable next to a
+  newer page); the browser derives it once per visit (`sideKey()` in core.js).
+- `strava_cache.py` – **history import (24.09.2026, he asked for all old runs/hikes)**:
+  `cache/activities.enc` holds the full activity list (trimmed fields); each build asks only for the last 35
+  days again (1 call; edits and deletions in that window show), a full re-read once a week; if Strava fails,
+  the cached list is used so the site still builds. Per activity, `cache/<id>.enc` holds streams (time,
+  distance, HR, speed, altitude, cadence) trimmed to ~160 samples, a seconds-per-bpm histogram, km splits,
+  and – from the **activity endpoint** (`/activities/{id}`, which also carries the laps) – best efforts with PR
+  rank, shoe, calories, device, temperature and description. A new activity costs 2 calls (streams +
+  activity); older cache entries without `detv`/`cadv` are topped up with 1 call each. Order: last 140 days
+  first, then history newest first. **Budget 80 calls per build, and it stops when any window (15-min or daily,
+  overall or read – `X-ReadRateLimit-*` too) has fewer than 30 left** – Strava's personal-app read limit is
+  1,000/day, so a large history arrives over a day or two. Cadence is doubled only on foot (Strava counts one
+  foot; bike cadence is rpm). Manual entries are skipped. Tested against a fake Strava (list paging,
+  incremental merge, deletion, weekly re-read, offline fallback, budget, reserve).
+- `analysis.py` – the meaning of the numbers: `detect_reps` (work intervals from the watch laps – the widest
+  pace gap splits work from rest, auto 1 km laps ignored – else from the pace stream for reps ≥ 2 min),
+  `rep_stats`, `run_kind` (**threshold / easy / long / race, from time at threshold HR, detected reps, Strava's
+  workout/race flag or the name – never from average HR**), `coach_verdict` (threshold judged by rep HR, the
+  last third of the reps when reps are short because HR lags; easy/long by average HR), GAP (Minetti slope
+  cost, clamped), `pace_targets` (threshold window from reps ≥ 2 min at threshold HR in the last 6 weeks, easy
+  window from easy runs under the ceiling), `fitness_series` (CTL 42 d / ATL 7 d / form), `route_groups`
+  (same route: distance within 8 %, starts within 250 m, lines ≤ 90 m apart on average), `predict` (Riegel).
 - `report.py` – builds what is fixed at build time: the numbers and the page skeletons, then inlines the
   browser code. It draws **no charts** – Progress gets empty `.pc` slots (`chart_slot()`) plus the numbers
   as `window.PROG` (`progress_payload()`; tooltip texts `Title|line|line`, already HTML-escaped). Six pages – Home, Plan, Runs, Map, Progress, Settings –
   behind a hash router (`#/home`, `#/run/<id>`, …); switching needs no network. Data reaches the browser as
-  `window.CONF`, `window.RUNS` (compact per-run JSON: streams `t d hs sp al cd`, laps `laps`, splits `sl`,
-  zone seconds `zs`, kind `k`, effort `re`), `window.NOTES`, `window.PLAN` and `window.PROG`.
+  `window.CONF` (incl. `targets`, `race`, `side`, `sports`), `window.ACTS` (**every activity**, compact:
+  `id n ty dt m s e up hr mhr cad z k re th rg g rn`; `th` = SVG path of the route thumbnail, `rg` = same-route
+  group, `rn` = rep count; the last 140 days also carry `t d hs sp al cd laps sl zs poly reps rs be gap coach …`,
+  older ones have `x:1` and load that from `a/<id>.bin` via `loadDetail()`), `window.NOTES` (`{text, rpe,
+  updated}` per activity), `window.PLAN` and `window.PROG` (Progress data incl. `fit`, `ytd`, `best`, `shoes`).
+  In core.js `acts` is everything and `runs` the runs.
   Per-run numbers worked out here: `run_kind()` (**easy / long / threshold, judged by ≥ 8 min at threshold
   or above, not by average HR** – an interval session's average includes warm-up and jogs), `effort_of()`
   (Edwards' TRIMP from the histogram), metres per heartbeat, `rep_pace()` (laps at ≥ 82% HRmax),
@@ -48,7 +71,8 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   function scope** (a helper in `core.js` is visible to every later file). `core.js` (formatting, dates in
   `YYYY-MM-DD`, `prefs`, storage, AES helpers, `pullEncrypted` / `putEncrypted`, the sheet), `charts.js`
   (the chart engine and a run's charts), `map.js`, `run.js` (run page + map explorer), `mappage.js`,
-  `progress.js` (the Progress charts), `plan.js` (Plan page and Home's plan cards), `settings.js`, `boot.js`
+  `activities.js` (the Activities list: sport and year chips, totals, route thumbnails, rows drawn 40 at a time
+  as you scroll), `progress.js` (the Progress charts and the training log), `plan.js` (Plan page and Home's plan cards), `settings.js`, `boot.js`
   (start-up and the per-page hook the router calls), `router.js` (separate), `app.css` (the design system).
 - **Charts (rebuilt 24.09.2026)** – all drawn in the browser by one small engine in `charts.js`, **at the
   pixel size they are shown** (SVG width = box width, redrawn by a ResizeObserver), so text is real 11.5 px
@@ -107,11 +131,23 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   shell, serves same-origin requests network-first, and keeps the vendored files in a separate
   `trening-vendor` cache (cache-first, survives new builds). The dashboard shows **"Update ready · Reload"**
   when a new worker arrives. `make_icon.py` draws the icons (needs Pillow; the site build does not).
+- **Run page** (`run.js`), top to bottom: header (session type + reps, grey-zone warning, the planned session),
+  map + stats (GAP, kcal, temperature, shoe, device), **Coach** (the verdict + **planned vs done**: `planCheck()`
+  in plan.js finds the matched session and `parsePlan()` reads his plan text – "5×6 min", "20×1 min",
+  "10×(45/15)", "2×(8×(45/15))", ladders "(7–6–5–4–3–2–1 min)", "15 min sammenhengende terskel", "75–80 min" –
+  into reps/work/minutes), charts, **Reps** (chart + table, laps folded), splits with GAP, zone bars, best
+  efforts with PR medals, **This route** (pace on every run of the route), **Compare** (any similar activity:
+  table + dashed overlay), and **How did it feel** (1–10 + notes). **His notation (24.09.2026): a bare number
+  before or after a "+" is warm-up / cool-down minutes – "10 + 5×(45/15) + 5" is 5 reps.** Both `parsePlan()`
+  and `split_title()` follow it.
+- **Home**: next session with **heart rate and pace targets**, the week with a progress ring, race goal card
+  (countdown + Riegel prediction, from Settings), tiles, latest run judged by type, **last week in review**.
 - `config.json` – client_id (281348), max_hr, timezone. (plan_start/plan_days are gone: dates come from
   `training_plan.py`, and moving sessions is done in the calendar.)
 - `.github/workflows/update.yaml` – hourly (cron `17 * * * *`), manual dispatch, and on push to main. Deploys to
   GitHub Pages (Source: GitHub Actions). Commits `token.enc` and `cache/`, plus a keep-alive commit if idle > 40 days.
 - `token.enc` – Strava refresh token, AES with a key from `STRAVA_CLIENT_SECRET`. Never commit it in plaintext.
+- `settings.enc` holds `max_hr` and an optional `race` `{name, date, m, goal}` – both validated in `load_settings()`.
 - `notes.enc`, `settings.enc`, `plan.enc` – written **from the browser** with the dashboard password (the login
   shell hands it over in `sessionStorage`) through the GitHub Contents API, using a **fine-grained PAT**
   (this repo only, Contents read/write) pasted once per device in Settings and kept in `localStorage`. Reading
@@ -155,25 +191,30 @@ Never commit `site/`, sample data, a real `plan.enc` made in a test, or any secr
 - After changes, push to `main` (or open a PR he can merge) – that triggers a rebuild and deploy. Tell him what changed in 1–3 lines.
 
 ## Roadmap
-Built (as of 23.09.2026):
+Built (as of 24.09.2026):
 1. **Home** – the next session from the (editable) plan with its HR target, this week's strip with ticks,
    three key numbers, the latest run with a coach comment.
 2. **Plan** – week/month calendar with drag-to-move, edit, add and remove, synced via `plan.enc`; his own
    plan (see "Your role"); ISO week numbers; a "How this plan works" card with Bakken's key points; HR zones.
-3. **Runs** – list by month with a zone stripe; run page with map preview + 3D explorer, stats (incl. cadence
-   and effort), HR / pace / cadence / elevation charts against distance (tap to open, pinch to zoom), laps,
-   splits, time in zones, notes.
-4. **Map** – heat map and routes of every run, filters, tap to open, 3D.
+3. **Activities** (tab was "Runs") – the whole Strava history, every sport; run page as described above.
+4. **Map** – heat map and routes of every activity all the way back (routes load from `routes.bin`), filters
+   by period (4 weeks … all time) and kind (runs, easy, long, threshold, hikes & walks, rides, everything).
 5. **Progress** – effort this week vs usual range, easy share, metres per beat, cadence; weekly training load;
    speed vs heart rate; aerobic efficiency; time in zones; threshold rep pace; long-run decoupling; cadence;
-   weekly distance. Every chart opens full screen and zooms.
+   weekly distance; **training log** (Strava style), **fitness & freshness**, **this year vs earlier years**,
+   **best efforts**, **how hard it felt**, **shoes**. Every chart opens full screen and zooms.
 6. **Settings** – appearance, default basemap and route line, max HR, GitHub token, about/update.
 
 Maps history, so it is not re-litigated: the hand-drawn raster map was replaced by MapLibre on 23.09.2026.
 **CARTO basemaps need an API key** (watermark "API KEY REQUIRED" since ~Aug 2026; `roboes/strava-local-heatmap-tool`
 is out of date on this) – not used. OpenFreeMap needs no key and gives the Positron look he wanted.
 
-Not built yet / ideas: best efforts (1k/5k/10k), run-vs-run comparison, shoe mileage, race goal + predicted
-time, editing the zone percentages, an all-time heat map (the activity list is fetched for 140 days only;
-older summary polylines would cost only a few extra list calls). A real iOS app needs the $99/year Apple
+Not built yet / ideas: editing the zone percentages; weather per run (Open-Meteo is free and keyless, but it
+would send his locations to a third party - ask first).
+
+**Garmin direct (asked 24.09.2026):** not worth it now. Garmin's official APIs are for approved business
+partners; the unofficial libraries log in with his Garmin password (kept as a secret, breaks with 2FA and
+changes, against Garmin's terms). Strava already delivers everything the app uses. What Garmin alone has:
+HRV, sleep, training readiness, Garmin's own lactate-threshold estimate, running dynamics. Revisit only if he
+wants those - and then prefer a manual export over storing his password. A real iOS app needs the $99/year Apple
 Developer Program – do not spend effort on it unless he decides to pay; the PWA is the free route.
