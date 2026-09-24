@@ -19,12 +19,14 @@ Layout of this file:
   5. Shell: menu, and the assembly of CSS and scripts
 """
 import json
+import math
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta, date
 from html import escape
 from pathlib import Path
 
+import analysis
 import strava_cache
 import training_plan
 
@@ -40,7 +42,7 @@ def _web(name):
 
 RUN_TYPES = {"Run", "TrailRun", "VirtualRun"}
 WEEKS_SHOWN = 16          # bars in the weekly distance chart
-RUNS_LISTED = 60          # rows on the Runs page
+RECENT_DAYS = 140         # activities shipped inside the page; older ones load on demand
 
 # Intensity zones as % of max heart rate (Norwegian-method inspired)
 ZONES = [
@@ -56,7 +58,7 @@ ORDER = ["easy", "moderate", "threshold", "hard", "nohr"]
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 SHORT_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-PAGES = [("home", "Home"), ("plan", "Plan"), ("runs", "Runs"), ("map", "Map"),
+PAGES = [("home", "Home"), ("plan", "Plan"), ("runs", "Activities"), ("map", "Map"),
          ("progress", "Progress"), ("settings", "Settings")]
 SECTIONS = PAGES + [("run", "Run")]   # /run/<id> has no tab of its own
 
@@ -80,14 +82,19 @@ def zone_of(run, max_hr):
     return zone_for_pct(hr / max_hr * 100) if hr else "nohr"
 
 
-def run_kind(run):
-    """What sort of session a run was: 'threshold', 'long' or 'easy'.
-    Judged by time actually spent at threshold or above, not by the average -
-    an interval session's average includes the warm-up and the jogs."""
-    zs = run.get("_zone_seconds") or {}
-    if zs.get("threshold", 0) + zs.get("hard", 0) >= 8 * 60:
-        return "threshold"
-    return "long" if run.get("moving_time", 0) >= 55 * 60 else "easy"
+def kind_name(kind, sport_type):
+    """What a session is called in the app: the kind of run, else the sport."""
+    if kind:
+        return KIND_NAMES[kind]
+    return SPORT_NAMES.get(sport_type, re.sub(r"(?<=[a-z])(?=[A-Z])", " ", sport_type or "Workout"))
+
+
+KIND_NAMES = {"threshold": "Threshold", "easy": "Easy", "long": "Long run", "race": "Race"}
+SPORT_NAMES = {"Hike": "Hike", "Walk": "Walk", "Ride": "Ride", "VirtualRide": "Indoor ride", "EBikeRide": "E-bike",
+               "MountainBikeRide": "MTB", "GravelRide": "Gravel ride", "NordicSki": "Cross-country ski",
+               "BackcountrySki": "Ski touring", "AlpineSki": "Alpine ski", "Swim": "Swim",
+               "WeightTraining": "Strength", "Workout": "Workout", "Yoga": "Yoga", "Rowing": "Rowing",
+               "Kayaking": "Kayak", "StandUpPaddling": "SUP", "Snowshoe": "Snowshoe", "RockClimbing": "Climbing"}
 
 
 # Edwards' heart-rate load: each minute counts 1-5 by how hard it was.
@@ -114,15 +121,13 @@ def effort_of(run, max_hr):
     return round(run["moving_time"] / 60 * w)
 
 
-def rep_pace(run, max_hr):
-    """(seconds per km, average bpm) over the laps run at threshold or above -
-    the reps of an interval session without the warm-up and the jogs."""
-    laps = (run.get("_detail") or {}).get("laps") or []
-    reps = [l for l in laps if l.get("hr") and l["hr"] >= max_hr * 0.82 and l.get("m", 0) >= 300]
-    if len(reps) < 2:
+def rep_pace(run):
+    """(seconds per km, average bpm) over the detected reps of a session -
+    the work without the warm-up and the jogs."""
+    st = run.get("_rep_stats")
+    if not st or not st.get("pace") or st["n"] < 2:
         return None
-    m, secs = sum(l["m"] for l in reps), sum(l["s"] for l in reps)
-    return secs / (m / 1000), sum(l["hr"] * l["s"] for l in reps) / secs
+    return st["pace"], st["hr"]
 
 
 def decoupling(run):
@@ -227,7 +232,16 @@ WRAPPED = re.compile(r"^(\d+(?:–\d+)? min (?:oppvarming|svært lett jogg)) \+ 
                      r"(\d+(?:–\d+)? min (?:nedjogg|svært lett jogg|rolig jogg))$")
 
 
+# His own shorthand: "10 + 5×(45/15) + 5" - bare numbers are warm-up and cool-down minutes.
+SHORTHAND = re.compile(r"^(\d+)\s*\+\s*(.*×.*?)(?:\s*\+\s*(\d+))?$")
+
+
 def split_title(title, detail):
+    short = SHORTHAND.match(title)
+    if short and "min" not in title.split("+")[0]:
+        warm, core, cool = short.groups()
+        frame = f"{warm} min oppvarming før" + (f", {cool} min nedjogg etter." if cool else ".")
+        return core[0].upper() + core[1:], f"{frame}\n{detail}" if detail else frame
     m = WRAPPED.match(title)
     if not m:
         return title, detail
@@ -263,28 +277,10 @@ def standard_plan(today, days_back=140):
 
 
 def coach_note(run, max_hr):
-    """One honest sentence about the latest run."""
+    """One honest sentence or two about a run, judged for what it was."""
     if not run:
         return "No runs in the last 140 days yet. The first easy run is the whole plan for now."
-    zone, hr = run["_zone"], run.get("average_heartrate")
-    easy_max, thr_lo, thr_hi = bpm(max_hr, 75), bpm(max_hr, 82), bpm(max_hr, 88) - 1
-    if zone == "nohr":
-        return ("No heart rate on this one. Check that the chest strap is damp and sitting snug - "
-                "without it the zones are guesswork.")
-    if zone == "easy":
-        if hr > easy_max - 6:
-            return (f"Easy, but only just: {hr:.0f} bpm against a ceiling of {easy_max}. "
-                    f"On the next easy run aim a little lower - it should feel almost lazy.")
-        return (f"Well judged. {hr:.0f} bpm is comfortably inside easy (under {easy_max}), "
-                f"which is exactly where most of your running should sit.")
-    if zone == "moderate":
-        return (f"{hr:.0f} bpm puts this in the grey zone - harder than easy, easier than threshold. "
-                f"It tires you without the threshold payoff. Slow the easy days down to under {easy_max} bpm.")
-    if zone == "threshold":
-        return (f"Average {hr:.0f} bpm - proper threshold work ({thr_lo}–{thr_hi} bpm). "
-                f"Keep the reps controlled: you should finish feeling you had one more in you.")
-    return (f"Average {hr:.0f} bpm is above threshold. Fine for a race or a hard hill, but it is not "
-            f"part of the plan - the hard days are meant to be controlled, not all-out.")
+    return run["_coach"]
 
 
 # ------------------------------------------------------------- 3. chart data
@@ -311,7 +307,67 @@ def progress_payload(d):
         "eff": [[iso(dt), round(v, 3), tip] for dt, v, tip in d["eff_points"]],
         "reps": [[iso(dt), round(v, 1), tip] for dt, v, tip in d["rep_points"]],
         "cad": [[iso(dt), v, tip] for dt, v, tip in d["cad_points"]],
+        "best": best_efforts_table(d),
+        "fit": [[iso(day), c, a, f] for day, c, a, f in d["fitness"][-400:]],
+        "ytd": year_totals(d),
+        "shoes": [{"name": g["name"] or "Unnamed shoe", "km": round(g["m"] / 1000), "n": g["n"],
+                   "first": iso(g["first"].date()), "last": iso(g["last"].date())}
+                  for g in sorted(d["gear"].values(), key=lambda g: g["last"], reverse=True)],
     }
+
+
+BEST_ORDER = ["400m", "1K", "1 mile", "5K", "10K", "15K", "Half-Marathon", "Marathon"]
+
+
+def best_efforts_table(d):
+    """Fastest time per distance, all time and in the last 90 days."""
+    cut = d["today"] - timedelta(days=90)
+    rows = []
+    for name in BEST_ORDER:
+        tries = d["best"].get(name)
+        if not tries:
+            continue
+        pick = lambda xs: min(xs, key=lambda x: x[0]) if xs else None
+        ever, lately = pick(tries), pick([t for t in tries if t[1]["_date"].date() >= cut])
+        cell = lambda x: None if not x else {"s": x[0], "id": x[1]["id"], "dt": x[1]["_date"].date().isoformat(),
+                                             "n": x[1]["name"]}
+        rows.append({"name": name, "ever": cell(ever), "recent": cell(lately), "count": len(tries)})
+    return rows
+
+
+def year_totals(d):
+    """Running distance added up through each year, one point a week - the
+    'this year against last year' curve. Only the last five years."""
+    by_year = defaultdict(lambda: defaultdict(float))
+    for r in d["all_runs"]:
+        day = r["_date"].date()
+        by_year[day.year][day.timetuple().tm_yday] += (r.get("distance") or 0) / 1000
+    out = {}
+    for year in sorted(by_year)[-5:]:
+        last = 366 if year < d["today"].year else d["today"].timetuple().tm_yday
+        pts, total = [[0, 0]], 0.0
+        for doy in range(1, last + 1):
+            total += by_year[year].get(doy, 0)
+            if doy % 7 == 0 or doy == last:
+                pts.append([doy, round(total, 1)])
+        out[str(year)] = pts
+    return out
+
+
+def race_info(d):
+    """His race goal from Settings with a predicted time, or None."""
+    race = d.get("race")
+    if not race:
+        return None
+    cut = d["today"] - timedelta(days=120)
+    efforts = []
+    for name, metres in analysis.EFFORT_METRES.items():
+        tries = [t for t in d["best"].get(name, []) if t[1]["_date"].date() >= cut]
+        if tries:
+            s, r = min(tries, key=lambda t: t[0])
+            efforts.append((metres, s, name, r["_date"].date().isoformat(), r["id"]))
+    guess = analysis.predict(efforts, race["m"])
+    return dict(race, predicted=guess)
 
 
 def chart_slot(key, label, empty=None):
@@ -363,7 +419,8 @@ def page_home(d):
     # ---- latest run
     last = d["latest"]
     if last:
-        z = last["_zone"]
+        kind = last["_kind"]
+        colour = {"threshold": "var(--z-threshold)", "race": "var(--z-hard)"}.get(kind, "var(--z-easy)")
         latest_body = (
             f'<div class="runhead"><b>{escape(last["name"])}</b>'
             f'<span class="when">{day_word(last["_date"].date(), today)} · '
@@ -373,16 +430,20 @@ def page_home(d):
             f'<div><span class="m">{fmt_hours(last["moving_time"])}</span><span class="u">time</span></div>'
             f'<div><span class="m">{fmt_pace(last["moving_time"], last["distance"])}</span><span class="u">/km</span></div>'
             f'<div><span class="m">{hr_text(last)}</span><span class="u">bpm</span></div>'
-            f'</div><p class="zoneline">{dot(z)}{NAMES[z]}</p>'
-            f'<p class="note-coach">{coach_note(last, max_hr)}</p>')
+            f'</div><p class="zoneline"><span class="typechip" style="--zc:{colour}"><i></i>{KIND_NAMES[kind]}'
+            + (f' · {last["_rep_stats"]["n"]} reps' if last["_rep_stats"] else "") + '</span></p>'
+            f'<p class="note-coach">{escape(coach_note(last, max_hr))}</p>'
+            f'<p class="more-line"><a href="#/run/{last["id"]}">Open the run →</a></p>')
     else:
         latest_body = f'<p class="note-coach">{coach_note(None, max_hr)}</p>'
 
     return ('<section class="card nx" id="homenext"></section>'
-            + card('<p class="sub tight" id="homeweeksub"></p><div class="week" id="homeweek"></div>',
+            + card('<p class="weeksub" id="homeweeksub"></p><div class="week" id="homeweek"></div>',
                    head="This week", link=("plan", "Plan"))
+            + '<section class="card race" id="homerace" hidden></section>'
             + tiles
-            + card(latest_body, head="Latest run", link=("runs", "All runs")))
+            + card(latest_body, head="Latest run", link=("runs", "All activities"))
+            + '<section class="card" id="homereview" hidden></section>')
 
 
 def page_plan(d):
@@ -421,81 +482,117 @@ def page_plan(d):
                   f'<p class="hint">Based on a max heart rate of {max_hr} bpm.</p>')
 
     return (card(calendar, cls="calcard")
-            + card(guide_body, head="How this plan works")
+            + '<details class="card foldcard" id="planguide"><summary><h2>How this plan works</h2></summary>'
+            + guide_body + '</details>'
             + card(zones_body, head="Your heart rate zones"))
 
 
 def page_runs(d):
-    runs = d["runs"][:RUNS_LISTED]
-    if not runs:
-        return card('<p class="sub">No runs found in the last 140 days.</p>', head="Runs")
-    months, current = [], None
-    for r in runs:
-        key = r["_date"].strftime("%B %Y")
-        if key != current:
-            current = key
-            months.append(f'<h3 class="month">{key}</h3>')
-        z = r["_zone"]
-        months.append(
-            f'<a class="runrow" href="#/run/{r["id"]}" style="--zc:var(--z-{z})">'
-            f'<div class="rmain"><span class="rdate">{SHORT_DAYS[r["_date"].weekday()]} '
-            f'{r["_date"].strftime("%d.%m")}</span>'
-            f'<span class="rname">{escape(r["name"])}</span>'
-            f'<span class="rzone">{dot(z)}{NAMES[z]}</span></div>'
-            f'<div class="rnums"><span><b>{r["distance"]/1000:.1f}</b> km</span>'
-            f'<span><b>{fmt_time(r["moving_time"])}</b></span>'
-            f'<span><b>{fmt_pace(r["moving_time"], r["distance"])}</b> /km</span>'
-            f'<span><b>{hr_text(r)}</b> bpm</span>'
-            f'<span class="chev">›</span></div></a>')
-    total_km = sum(r["distance"] for r in d["runs"]) / 1000
-    total_time = sum(r["moving_time"] for r in d["runs"])
-    summary = (f'<div class="tiles">'
-               f'<div class="tile"><div class="label">Runs</div><div class="value">{len(d["runs"])}</div>'
-               f'<div class="note">last 140 days</div></div>'
-               f'<div class="tile"><div class="label">Distance</div>'
-               f'<div class="value">{total_km:.0f}<span class="unit">km</span></div>'
-               f'<div class="note">last 140 days</div></div>'
-               f'<div class="tile"><div class="label">Time</div>'
-               f'<div class="value">{fmt_hours(total_time)}</div><div class="note">moving time</div></div>'
-               f'</div>')
-    waiting = len(d["runs"]) - d["detailed"]
+    """Every activity, all the way back: drawn in the browser (web/activities.js),
+    filtered by sport and year and shown a batch at a time."""
+    waiting = sum(1 for a in d["acts"] if not a["_detail"] and not a.get("manual"))
     note = ("" if not waiting else
-            f'<p class="hint">{waiting} older run{"s" if waiting != 1 else ""} still '
-            f'{"have" if waiting != 1 else "has"} no heart-rate detail yet - the hourly update fetches '
-            f'a batch at a time to stay inside Strava\'s limits.</p>')
-    listing = (f'<div class="runs">{"".join(months)}</div>'
-               f'<p class="hint">Tap a run for its map, heart-rate curve, laps and splits.</p>{note}')
-    return summary + card(listing, head=f"Last {min(len(d['runs']), RUNS_LISTED)} runs")
+            f'<p class="hint">{waiting} older activit{"ies" if waiting != 1 else "y"} still '
+            f'{"have" if waiting != 1 else "has"} no heart-rate detail - the hourly update fetches a batch '
+            f'at a time to stay inside Strava\'s limits, newest first.</p>')
+    return '<div id="actpage"></div>' + note
 
 
-def runs_payload(d):
-    """Compact JSON for the run pages. Short keys because every byte is shipped."""
-    out = []
-    for r in d["runs"]:
-        det = r["_detail"] or {}
-        item = {
-            "id": r["id"], "n": r["name"], "dt": r["_date"].isoformat(),
-            "m": round(r["distance"]), "s": round(r["moving_time"]),
-            "e": round(r.get("elapsed_time") or r["moving_time"]),
-            "up": round(r.get("total_elevation_gain") or 0),
-            "hr": round(r["average_heartrate"]) if r.get("average_heartrate") else None,
-            "mhr": round(r["max_heartrate"]) if r.get("max_heartrate") else None,
-            "cad": round(r["average_cadence"] * 2) if r.get("average_cadence") else None,
-            "z": r["_zone"], "k": r["_kind"], "re": r["_effort"],
-            "poly": (r.get("map") or {}).get("summary_polyline") or "",
-            "zs": {k: round(v) for k, v in r["_zone_seconds"].items() if v},
-        }
-        if det:
-            item |= {"t": det.get("t") or [], "d": det.get("d") or [],
-                     "hs": det.get("hr") or [], "sp": det.get("sp") or [],
-                     "al": det.get("alt") or [], "cd": det.get("cad") or [],
-                     "laps": det.get("laps") or [], "sl": det.get("splits") or []}
-        out.append(item)
+def thumb(poly, size=44):
+    """A small drawing of the route for the activity list: an SVG path in a
+    size x size box, relative moves so it stays short."""
+    pts = analysis.route_points(poly, 40) if poly else None
+    if not pts:
+        return ""
+    lat0 = sum(p[0] for p in pts) / len(pts)
+    xy = [(p[1] * math.cos(math.radians(lat0)), -p[0]) for p in pts]
+    x0, x1 = min(p[0] for p in xy), max(p[0] for p in xy)
+    y0, y1 = min(p[1] for p in xy), max(p[1] for p in xy)
+    span = max(x1 - x0, y1 - y0) or 1e-9
+    k = (size - 6) / span
+    ox, oy = (size - (x1 - x0) * k) / 2, (size - (y1 - y0) * k) / 2
+    ints = [(round((x - x0) * k + ox), round((y - y0) * k + oy)) for x, y in xy]
+    out, prev = [f"M{ints[0][0]} {ints[0][1]}"], ints[0]
+    for p in ints[1:]:
+        if p != prev:
+            out.append(f"l{p[0] - prev[0]} {p[1] - prev[1]}")
+            prev = p
+    return "".join(out)
+
+
+def detail_of(a, d):
+    """The heavy part of one activity: streams, laps, splits, reps, efforts.
+    Inside the page for the last 140 days, a side file for older ones."""
+    det = a["_detail"] or {}
+    gaps = analysis.split_gaps(det)
+    splits = [dict(sp, gap=g) if g else sp for sp, g in zip(det.get("splits") or [], gaps + [None] * 400)]
+    out = {"t": det.get("t") or [], "d": det.get("d") or [], "hs": det.get("hr") or [],
+           "sp": det.get("sp") or [], "al": det.get("alt") or [], "cd": det.get("cad") or [],
+           "laps": det.get("laps") or [], "sl": splits,
+           "zs": {k: round(v) for k, v in a["_zone_seconds"].items() if v},
+           "poly": (a.get("map") or {}).get("summary_polyline") or ""}
+    g = analysis.gap(det)
+    if g and a["_sport"] in analysis.FOOT_TYPES:
+        out["gap"] = round(g)
+    if a["_reps"]:
+        out["reps"] = [{k: r[k] for k in ("s", "m", "hr", "mhr", "lap") if r.get(k) is not None} for r in a["_reps"]]
+        st = a["_rep_stats"]
+        out["rs"] = {"n": st["n"], "s": st["s"], "m": st["m"], "avg_s": st["avg_s"], "hr": st["hr"],
+                     "hr_tail": st["hr_tail"], "pace": round(st["pace"]) if st["pace"] else None,
+                     "fade": round(st["fade"], 1) if st["fade"] is not None else None, "short": st["short"]}
+    for key in ("be", "cal", "temp", "dev", "desc"):
+        if det.get(key):
+            out[key] = det[key]
+    if (det.get("gear") or {}).get("name"):
+        out["gear"] = det["gear"]["name"]
+    if a.get("_coach"):
+        out["coach"] = a["_coach"]
     return out
 
 
+def acts_payload(d):
+    """(compact list of every activity, side files). Short keys because every
+    byte is shipped; empty values are left out."""
+    items, side, routes = [], {}, {}
+    first_day = d["today"] - timedelta(days=RECENT_DAYS)
+    for a in d["acts"]:
+        poly = (a.get("map") or {}).get("summary_polyline") or ""
+        item = {
+            "id": a["id"], "n": a.get("name") or "", "ty": a["_sport"], "dt": a["_date"].isoformat(),
+            "m": round(a.get("distance") or 0), "s": round(a.get("moving_time") or 0),
+            "e": round(a.get("elapsed_time") or a.get("moving_time") or 0),
+            "up": round(a.get("total_elevation_gain") or 0),
+            "hr": round(a["average_heartrate"]) if a.get("average_heartrate") else None,
+            "mhr": round(a["max_heartrate"]) if a.get("max_heartrate") else None,
+            "cad": a["_cad"] or (round(a["average_cadence"]) if a.get("average_cadence") else None),
+            "z": a["_zone"], "k": a["_kind"], "re": a["_effort"], "th": thumb(poly),
+            "rg": d["groups"].get(a["id"]), "g": a.get("gear_id"),
+        }
+        if a["_rep_stats"]:
+            item["rn"] = a["_rep_stats"]["n"]
+        item = {k: v for k, v in item.items() if v not in (None, "", [])}
+        if poly:
+            routes[a["id"]] = poly
+        if a["_detail"]:
+            if a["_date"].date() >= first_day:
+                item |= detail_of(a, d)
+            else:
+                item["x"] = 1                          # detail waits in a/<id>.bin
+                side[f"a/{a['id']}.bin"] = detail_of(a, d)
+        items.append(item)
+    side["routes.bin"] = routes
+    return items, side
+
+
 def page_map(d):
-    """A full-screen map of every run; web/mappage.js draws it when the tab opens."""
+    """A full-screen map of every activity; web/mappage.js draws it when the tab opens."""
+    has = lambda test: any(test(a) for a in d["acts"] if (a.get("map") or {}).get("summary_polyline"))
+    kinds = [("runs", "Runs"), ("easy", "Easy"), ("long", "Long"), ("threshold", "Threshold")]
+    if has(lambda a: a["_sport"] in ("Hike", "Walk")):
+        kinds.append(("foot", "Hikes & walks"))
+    if has(lambda a: "Ride" in a["_sport"]):
+        kinds.append(("ride", "Rides"))
+    kinds.append(("all", "Everything"))
     chip = lambda attr, val, label: f'<button type="button" data-{attr}="{val}">{label}</button>'
     basemaps = "".join(
         f'<button type="button" role="menuitemradio" data-basemap="{k}"><span><b>{n}</b><small>{h}</small></span></button>'
@@ -510,10 +607,10 @@ def page_map(d):
         + chip("mode", "heat", "Heat map") + chip("mode", "routes", "Routes") +
         '</div>'
         '<div class="mp-chips" role="group" aria-label="Which runs">'
-        + "".join(chip("period", k, n) for k, n in (("28", "4 weeks"), ("91", "3 months"), ("all", "All"))) +
+        + "".join(chip("period", k, n) for k, n in (("28", "4 weeks"), ("91", "3 months"), ("365", "1 year"),
+                                                    ("all", "All time"))) +
         '<span class="mp-sep" aria-hidden="true"></span>'
-        + "".join(chip("kind", k, n) for k, n in (("all", "All runs"), ("easy", "Easy"),
-                                                  ("long", "Long"), ("threshold", "Threshold"))) +
+        + "".join(chip("kind", k, n) for k, n in kinds) +
         '</div><p class="mp-stats"></p></div>'
         '<div class="mv-side mp-side">'
         '<button type="button" class="mbtn txt" data-act="3d" aria-pressed="false" aria-label="3D terrain">3D</button>'
@@ -594,16 +691,41 @@ def page_settings(d):
         f'<div class="noterow"><button type="button" id="clearlocal">Clear this device</button></div>'
         f'</details>')
 
+    race = d.get("race") or {}
+    dist_opts = "".join(
+        f'<option value="{m}"{" selected" if race and abs(race.get("m", 0) - m) < 1 else ""}>{name}</option>'
+        for m, name in ((5000, "5 km"), (10000, "10 km"), (21097.5, "Half marathon"), (42195, "Marathon")))
+    other = race and not any(abs(race.get("m", 0) - m) < 1 for m in (5000, 10000, 21097.5, 42195))
+    goal = race.get("goal") if race else None
+    goal_txt = (f'{goal // 3600}:{goal % 3600 // 60:02d}:{goal % 60:02d}' if goal and goal >= 3600
+                else f'{goal // 60}:{goal % 60:02d}' if goal else "")
+    race_card = (
+        f'<label class="field"><span>Race</span><input type="text" id="racename" maxlength="60" '
+        f'placeholder="e.g. Holmenkollstafetten" value="{escape(race.get("name", "")) if race else ""}"></label>'
+        f'<label class="field"><span>Date</span><input type="date" id="racedate" value="{race.get("date", "") if race else ""}"></label>'
+        f'<label class="field"><span>Distance</span><select id="racedist">{dist_opts}'
+        f'<option value="other"{" selected" if other else ""}>Other…</option></select></label>'
+        f'<label class="field" id="raceotherbox"{"" if other else " hidden"}><span>Kilometres</span>'
+        f'<input type="number" id="raceother" min="0.4" max="250" step="0.1" '
+        f'value="{round(race["m"] / 1000, 1) if other else ""}"></label>'
+        f'<label class="field"><span>Goal time (optional)</span><input type="text" id="racegoal" '
+        f'placeholder="h:mm:ss or mm:ss" value="{goal_txt}"></label>'
+        f'<div class="noterow"><button type="button" id="saverace">Save race</button>'
+        f'<button type="button" class="btn ghost" id="clearrace"{"" if race else " hidden"}>Remove</button>'
+        f'<span class="hint" id="racestatus"></span></div>'
+        f'<p class="hint">Home then counts down to it and predicts a time from your recent best efforts. '
+        f'Saved encrypted with the other settings.</p>')
     return (card(appearance, head="Appearance")
             + card(maps, head="Maps")
             + card(training, head="Training")
+            + card(race_card, head="Race goal")
             + card(syncing, head="Saving and syncing")
             + card(about, head="About"))
 
 
 def page_run(d):
     """An empty shell - the browser fills it in from RUNS when a run is opened."""
-    return ('<a class="back" href="#/runs">← All runs</a>'
+    return ('<a class="back" href="#/runs">← Activities</a>'
             '<div id="rundetail"><p class="sub">Loading…</p></div>')
 
 
@@ -689,15 +811,74 @@ def page_progress(d):
              'the pace - good endurance. Higher means the run was a touch too fast or too long for now. The first '
              '10 minutes are left out while heart rate settles. The marker on each bar is 5%.</p>')
 
+    log = ('<div id="traininglog" class="tlog"></div>'
+           '<p class="hint">One row a week, newest on top. The bigger the circle, the longer you were out; the colour '
+           'is the kind of session. Tap a circle to open it.</p>')
+
+    fitness = (chart_slot("fit", "Fitness, fatigue and form", "Needs a few weeks of runs with heart rate.") +
+               '<div class="flegend"><span><i class="lf fit"></i>Fitness</span><span><i class="lf fat"></i>Fatigue</span>'
+               '<span><i class="lf form"></i>Form</span></div>'
+               '<p class="hint">Fitness is your training load averaged over six weeks, fatigue over one week, '
+               'and form the difference - the model behind Strava\'s Fitness &amp; Freshness, built from the same '
+               'heart-rate effort as above and counting hikes and rides too. Form well below zero means tired: '
+               'fine in a build week, but not before a race. Aim to arrive at a race with form a little above zero.</p>')
+
+    ytd = (chart_slot("ytd", "Running distance through the year", "Needs runs from at least this year.") +
+           '<div class="flegend" id="ytdlegend"></div>'
+           '<p class="hint">Running kilometres added up day by day - this year against the years before.</p>')
+
+    best_rows = "".join(
+        f'<tr><td><b>{escape(b["name"])}</b></td>'
+        f'<td class="num">{best_cell(b["ever"], b["name"])}</td>'
+        f'<td class="num">{best_cell(b["recent"], b["name"])}</td></tr>'
+        for b in best_efforts_table(d))
+    best = ((f'<div class="scroll"><table class="besttab"><tr><th>Distance</th><th>All time</th><th>Last 90 days</th></tr>'
+             f'{best_rows}</table></div>') if best_rows else
+            '<p class="sub">No best efforts yet - they come from Strava with each run\'s detail.</p>') + \
+        '<p class="hint">The fastest stretch of each distance inside any run, as Strava measures it. Tap one to open that run.</p>'
+
+    shoe_rows = "".join(
+        f'<div class="shoe"><span class="sh-name"><b>{escape(g["name"] or "Unnamed shoe")}</b>'
+        f'<small>{g["n"]} runs · last {g["last"].strftime("%d.%m.%Y")}</small></span>'
+        f'<span class="sh-bar"><i class="{"worn" if g["m"] > 700000 else ""}" '
+        f'style="width:{min(100, g["m"] / 8000):.0f}%"></i></span>'
+        f'<span class="sh-km"><b>{g["m"] / 1000:.0f}</b> km</span></div>'
+        for g in sorted(d["gear"].values(), key=lambda g: g["last"], reverse=True))
+    shoes = ((f'<div class="shoes">{shoe_rows}</div>' if shoe_rows else
+              '<p class="sub">No shoes on your runs yet. Pick a shoe for a run in Strava and it shows up here.</p>') +
+             '<p class="hint">Distance run in each pair, from every run in your history. Most running shoes are good for '
+             'roughly 600–900 km; the bar fills at 800 and turns amber past 700.</p>')
+
+    feel = (chart_slot("rpe", "How hard runs felt", "Rate a run on its page (How did it feel?) and it shows here.") +
+            '<p class="hint">Your own 1–10 rating from the run page. Threshold sessions should sit around 6–7 and easy '
+            'runs at 2–4. If threshold starts feeling like 8–9 at the same heart rate, you are tired - take an easier week.</p>')
+
     return (tiles
+            + card(log, head="Training log")
+            + card(fitness, head="Fitness & freshness")
             + card(load, head="Training load")
+            + card(ytd, head="This year")
             + card(scatter, head="Speed against heart rate")
             + card(efficiency, head="Aerobic efficiency")
-            + card(zones, head="Time in zones")
+            + card(best, head="Best efforts")
             + card(reps, head="Threshold reps")
+            + card(zones, head="Time in zones")
+            + card(feel, head="How hard it felt")
             + card(drift, head="Long runs: heart-rate drift")
             + card(cadence, head="Cadence")
-            + card(distance, head="Weekly distance (km)"))
+            + card(distance, head="Weekly distance (km)")
+            + card(shoes, head="Shoes"))
+
+
+def best_cell(x, name):
+    if not x:
+        return '<span class="muted">-</span>'
+    metres = analysis.EFFORT_METRES.get(name) or {"400m": 400, "Marathon": 42195}.get(name)
+    pace_txt = f'<small>{analysis.fmt_pace(x["s"] / metres * 1000)} /km</small>' if metres else ""
+    t = x["s"]
+    shown = f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+    return (f'<a href="#/run/{x["id"]}"><b>{shown}</b></a>{pace_txt}'
+            f'<small>{date.fromisoformat(x["dt"]).strftime("%d.%m.%y")}</small>')
 
 
 # ------------------------------------------------------------- 5. the shell
@@ -721,7 +902,7 @@ CSS = _web("app.css")
 
 # The browser code, in load order. The files share one function scope, so a
 # helper in core.js is visible to every file after it.
-APP_FILES = ["core.js", "charts.js", "map.js", "run.js", "mappage.js", "progress.js", "plan.js", "settings.js",
+APP_FILES = ["core.js", "charts.js", "map.js", "run.js", "activities.js", "mappage.js", "progress.js", "plan.js", "settings.js",
              "boot.js"]
 APP_JS = "(function () {\n" + "\n".join(_web(f) for f in APP_FILES) + "\n})();\n"
 ROUTER = _web("router.js")
@@ -730,28 +911,44 @@ ROUTER = _web("router.js")
 # --------------------------------------------------------------- assembling
 
 def prepare(activities, config, details=None):
-    """Everything the pages need, worked out once."""
+    """Everything the pages need, worked out once. `activities` is the whole
+    history, every sport; the run pages and the plan look at runs, the
+    activity list and the fitness curve at everything."""
     details = details or {}
     max_hr = int(config["max_hr"])
-    runs = [a for a in activities if a.get("sport_type", a.get("type")) in RUN_TYPES]
-    for r in runs:
-        r["_zone"] = zone_of(r, max_hr)
-        r["_date"] = run_date(r)
-        r["_detail"] = details.get(r["id"])
-        # real time per zone when the heart-rate stream is cached, otherwise the whole
-        # run counts as its average zone
-        hist = (r["_detail"] or {}).get("hrhist")
-        r["_zone_seconds"] = (zones_from_histogram(hist, max_hr) if hist
-                              else {r["_zone"]: r["moving_time"]})
-        r["_kind"] = run_kind(r)
-        r["_effort"] = effort_of(r, max_hr)
-        hr = r.get("average_heartrate")
-        # metres covered per heartbeat: rises as the aerobic engine improves
-        r["_ef"] = (r["distance"] / r["moving_time"] * 60 / hr) if hr and r.get("moving_time") else None
-        r["_cad"] = round(r["average_cadence"] * 2) if r.get("average_cadence") else None
-    runs.sort(key=lambda r: r["_date"], reverse=True)
-
     today = date.fromisoformat(config["today"]) if config.get("today") else date.today()
+    acts = [a for a in activities if a.get("start_date_local") and a.get("id")]
+    for a in acts:
+        a["_date"] = run_date(a)
+        a["_sport"] = analysis.sport(a)
+        a["_run"] = a["_sport"] in RUN_TYPES
+        a["_detail"] = det = details.get(a["id"])
+        a["_zone"] = zone_of(a, max_hr)
+        # real time per zone when the heart-rate stream is cached, otherwise the whole
+        # activity counts as its average zone
+        hist = (det or {}).get("hrhist")
+        a["_zone_seconds"] = (zones_from_histogram(hist, max_hr) if hist
+                              else {a["_zone"]: a["moving_time"]} if a.get("moving_time") else {})
+        a["_effort"] = effort_of(a, max_hr)
+        a["_reps"], a["_rep_stats"], a["_kind"] = [], None, None
+        if a["_run"]:
+            a["_reps"] = analysis.detect_reps(det) if det else []
+            a["_rep_stats"] = analysis.rep_stats(a["_reps"], max_hr)
+            # without the stream only a whole run at threshold heart rate says "threshold"
+            kind_zs = (a["_zone_seconds"] if hist else
+                       a["_zone_seconds"] if a["_zone"] in ("threshold", "hard") else None)
+            a["_kind"] = analysis.run_kind(a, kind_zs, a["_reps"])
+            a["_coach"] = analysis.coach_verdict(a, a["_kind"], a["_rep_stats"], a["_zone_seconds"] if hist else None,
+                                                 max_hr)
+        hr = a.get("average_heartrate")
+        # metres covered per heartbeat: rises as the aerobic engine improves
+        a["_ef"] = (a["distance"] / a["moving_time"] * 60 / hr) if a["_run"] and hr and a.get("moving_time") else None
+        a["_cad"] = round(a["average_cadence"] * 2) if a["_run"] and a.get("average_cadence") else None
+    acts.sort(key=lambda a: a["_date"], reverse=True)
+    all_runs = [a for a in acts if a["_run"]]
+    first_day = today - timedelta(days=RECENT_DAYS)
+    runs = [r for r in all_runs if r["_date"].date() >= first_day]
+
     this_monday = today - timedelta(days=today.weekday())
     weeks = [this_monday - timedelta(weeks=i) for i in range(WEEKS_SHOWN - 1, -1, -1)]
     week_km = {w: defaultdict(float) for w in weeks}
@@ -761,7 +958,6 @@ def prepare(activities, config, details=None):
         week_runs[monday].append(r)
         if monday in week_km:
             week_km[monday][r["_zone"]] += r["distance"] / 1000
-
 
     cutoff = datetime.combine(today - timedelta(days=27), datetime.min.time())
     recent = [r for r in runs if r["_date"] >= cutoff]
@@ -778,10 +974,10 @@ def prepare(activities, config, details=None):
     for i, w in enumerate(weeks):
         prior = [week_effort[v] for v in weeks[max(0, i - 3):i] if week_effort[v]]
         if len(prior) == 3:
-            avg = sum(prior) / 3
-            effort_band[w] = (avg * 0.75, avg * 1.25)
+            mean = sum(prior) / 3
+            effort_band[w] = (mean * 0.75, mean * 1.25)
     d28 = today - timedelta(days=27)
-    fmt_pc = lambda sec: f"{int(sec // 60)}:{int(sec % 60):02d}"
+    fmt_pc = analysis.fmt_pace
     dated = sorted(runs, key=lambda r: r["_date"])
 
     speed_hr = [(r["average_heartrate"], r["moving_time"] / (r["distance"] / 1000),
@@ -804,11 +1000,11 @@ def prepare(activities, config, details=None):
     for r in dated:
         if r["_kind"] != "threshold":
             continue
-        rp = rep_pace(r, max_hr)
+        rp = rep_pace(r)
         if rp:
             rep_points.append((r["_date"].date(), rp[0],
                                f'{fmt_pc(rp[0])} /km in the reps|{escape(r["name"])} · {r["_date"].strftime("%d.%m")}'
-                               f'|Reps averaged {rp[1]:.0f} bpm'))
+                               + (f'|Reps averaged {rp[1]:.0f} bpm' if rp[1] else "")))
 
     long_drift = []
     for r in reversed(dated):
@@ -827,29 +1023,67 @@ def prepare(activities, config, details=None):
                      and cutoff - timedelta(days=28) <= r["_date"] < cutoff])
     cad_now = avg([r["_cad"] for r in recent])
 
+    # ---- all-time: best efforts, fitness, year totals, shoes, routes
+    best = {}
+    for r in all_runs:
+        for e in (r["_detail"] or {}).get("be") or []:
+            if e["n"] in analysis.EFFORT_METRES or e["n"] in ("400m", "1/2 mile", "Marathon", "30K"):
+                best.setdefault(e["n"], []).append((e["s"], r))
+    daily = defaultdict(float)
+    for a in acts:
+        if a["_effort"]:
+            daily[a["_date"].date()] += a["_effort"]
+    fit_first = min(daily) if daily else today
+    fitness = analysis.fitness_series(daily, fit_first, today) if daily else []
+    gear = {}
+    for r in all_runs:
+        gid = r.get("gear_id") or ((r["_detail"] or {}).get("gear") or {}).get("id")
+        if not gid:
+            continue
+        g = gear.setdefault(gid, {"id": gid, "name": "", "m": 0, "n": 0, "first": r["_date"], "last": r["_date"]})
+        g["m"] += r["distance"]
+        g["n"] += 1
+        g["first"], g["last"] = min(g["first"], r["_date"]), max(g["last"], r["_date"])
+        name = ((r["_detail"] or {}).get("gear") or {}).get("name")
+        if name and not g["name"]:
+            g["name"] = name
+    targets = analysis.pace_targets(all_runs, today, max_hr)
+    groups = analysis.route_groups(all_runs)
+
     return {
-        "max_hr": max_hr, "runs": runs, "today": today, "this_monday": this_monday,
+        "max_hr": max_hr, "acts": acts, "all_runs": all_runs, "runs": runs, "today": today,
+        "this_monday": this_monday,
         "weeks": weeks, "week_km": week_km,
         "week_label": f"Week {today.isocalendar()[1]}",
         "this_week_km": sum(week_km[this_monday].values()),
         "avg4": sum(sum(week_km[w].values()) for w in weeks[-5:-1]) / 4,
         "runs28": len(recent), "zone_seconds": zone_seconds, "easy_share": easy_share,
-        "detailed": sum(1 for r in runs if r["_detail"]),
-        "latest": runs[0] if runs else None,
+        "detailed": sum(1 for a in acts if a["_detail"]),
+        "latest": all_runs[0] if all_runs else None,
         "week_effort": week_effort, "effort_band": effort_band, "speed_hr": speed_hr,
         "eff_points": eff_points, "cad_points": cad_points, "rep_points": rep_points,
         "long_drift": long_drift, "ef_now": ef_now, "ef_before": ef_before, "cad_now": cad_now,
+        "best": best, "fitness": fitness, "gear": gear, "targets": targets, "groups": groups,
+        "race": config.get("race"),
         "updated": config.get("updated", datetime.now().strftime("%d.%m.%Y %H:%M")),
         "version": config.get("version", "dev"),
     }
 
 
 def render(activities, config, details=None, notes=None, plan=None):
+    """The dashboard page alone (tests and quick checks)."""
+    return render_site(activities, config, details, notes, plan)[0]
+
+
+def render_site(activities, config, details=None, notes=None, plan=None):
+    """(page HTML, {path: object}) - the side files are the older activities'
+    detail and every route, which build_site.py encrypts next to the page."""
     d = prepare(activities, config, details)
+    acts, side = acts_payload(d)
     heads = {
         "home": ("Training", f'{d["week_label"]} · updated {d["updated"]}'),
         "plan": ("Plan", "Three runs a week: two at threshold, one long and easy · Marius Bakken's method"),
-        "runs": ("Runs", "Your runs from Strava, last 140 days"),
+        "runs": ("Activities", "Everything from Strava, all the way back"),
         "map": ("Map", "Every run on one map"),
         "progress": ("Progress", f'Max heart rate {d["max_hr"]} bpm · updated {d["updated"]}'),
         "settings": ("Settings", "Appearance is per device; training settings sync to your other devices"),
@@ -864,18 +1098,19 @@ def render(activities, config, details=None, notes=None, plan=None):
         + bodies[key] + '</section>'
         for key, label in SECTIONS)
     conf = {"maxhr": d["max_hr"], "zones": [[k, label, lo, hi] for k, label, lo, hi, _ in ZONES],
-            "names": NAMES, "colors": COLORS, "order": ORDER, "days": WEEKDAYS,
+            "names": NAMES, "sports": SPORT_NAMES, "colors": COLORS, "order": ORDER, "days": WEEKDAYS,
             "repo": config.get("repo", ""), "version": d["version"],
-            "today": d["today"].isoformat()}
+            "today": d["today"].isoformat(), "recent": RECENT_DAYS,
+            "targets": d["targets"], "race": race_info(d), "side": config.get("side")}
     # "</" is escaped so a run named "</script>" cannot break out of the tag
     blob = lambda obj: json.dumps(obj, separators=(",", ":")).replace("</", "<\\/")
-    data = (f'<script>window.CONF={blob(conf)};window.RUNS={blob(runs_payload(d))};'
+    data = (f'<script>window.CONF={blob(conf)};window.ACTS={blob(acts)};'
             f'window.NOTES={blob(notes or {})};'
             f'window.PLAN={blob({"standard": standard_plan(d["today"]), "saved": plan})};'
             f'window.PROG={blob(progress_payload(d))};</script>')
     nav = "".join(f'<a href="#/{key}">{icon(key)}<span>{label}</span></a>' for key, label in PAGES)
 
-    return f"""<!doctype html>
+    html = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f2f4f6">
@@ -902,3 +1137,4 @@ def render(activities, config, details=None, notes=None, plan=None):
 <script>{APP_JS}</script>
 <script>{ROUTER}</script>
 </body></html>"""
+    return html, side

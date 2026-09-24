@@ -180,8 +180,9 @@
 
   var geoCache = {};
   function routeGeo(run) {
+    if (!run.poly) return null;              // not cached: the route may arrive later (loadRoutes)
     if (geoCache[run.id] !== undefined) return geoCache[run.id];
-    var c = run.poly ? decodePoly(run.poly) : [];
+    var c = decodePoly(run.poly);
     if (c.length < 2) return (geoCache[run.id] = null);
     var cum = [0], w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
     for (var i = 0; i < c.length; i++) {

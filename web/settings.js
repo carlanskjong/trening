@@ -45,20 +45,46 @@
     markChosen('mapchoice', 'map', savedBasemap());
     choiceGroup('routechoice', 'route', 'route', 'solid');
 
-    var status = document.getElementById('trainingstatus');
-    document.getElementById('savetraining').addEventListener('click', async function () {
-      var btn = this;
+    // Both cards write the same file, so each save sends everything.
+    var race = conf.race ? { name: conf.race.name, date: conf.race.date, m: conf.race.m, goal: conf.race.goal } : null;
+    async function saveSettings(btn, status) {
       btn.disabled = true;
       status.textContent = 'Saving…';
       var body = {
         max_hr: parseInt(document.getElementById('setmaxhr').value, 10) || conf.maxhr,
         updated: new Date().toISOString()
       };
+      if (race) body.race = race;
       var res = await putEncrypted('settings.enc', body, 'Save training settings');
       status.textContent = res.ok
         ? 'Saved. The dashboard rebuilds with it in a few minutes.'
         : (WHY[res.why] || 'Could not save.').replace('Saved on this device. ', '');
       btn.disabled = false;
+    }
+    var status = document.getElementById('trainingstatus');
+    document.getElementById('savetraining').addEventListener('click', function () { saveSettings(this, status); });
+
+    var raceStatus = document.getElementById('racestatus'), dist = document.getElementById('racedist');
+    dist.addEventListener('change', function () { document.getElementById('raceotherbox').hidden = dist.value !== 'other'; });
+    function seconds(txt) {
+      var p = String(txt || '').trim().split(':').map(Number);
+      if (!p[0] && p.length < 2 || p.some(isNaN)) return null;
+      return p.length === 3 ? p[0] * 3600 + p[1] * 60 + p[2] : p.length === 2 ? p[0] * 60 + p[1] : null;
+    }
+    document.getElementById('saverace').addEventListener('click', function () {
+      var name = document.getElementById('racename').value.trim(), date = document.getElementById('racedate').value;
+      var m = dist.value === 'other' ? parseFloat(document.getElementById('raceother').value) * 1000 : parseFloat(dist.value);
+      if (!date || !(m >= 400)) { raceStatus.textContent = 'Needs a date and a distance.'; return; }
+      var goalTxt = document.getElementById('racegoal').value, goal = seconds(goalTxt);
+      if (goalTxt.trim() && !goal) { raceStatus.textContent = 'Write the goal as h:mm:ss or mm:ss.'; return; }
+      race = { name: name || 'Race', date: date, m: m, goal: goal };
+      document.getElementById('clearrace').hidden = false;
+      saveSettings(this, raceStatus);
+    });
+    document.getElementById('clearrace').addEventListener('click', function () {
+      race = null;
+      this.hidden = true;
+      saveSettings(this, raceStatus);
     });
 
     var tokenInput = document.getElementById('ghtoken');

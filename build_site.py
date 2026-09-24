@@ -12,7 +12,6 @@ import json
 import os
 import shutil
 import sys
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,7 +32,6 @@ TOKEN_FILE = ROOT / "token.enc"
 NOTES_FILE = ROOT / "notes.enc"
 SETTINGS_FILE = ROOT / "settings.enc"
 PLAN_FILE = ROOT / "plan.enc"
-DAYS_BACK = 140
 PBKDF2_ROUNDS = 250_000
 b64 = lambda b: base64.b64encode(b).decode()
 
@@ -92,19 +90,22 @@ def get_access_token(client_id, secret):
     fail(f"Strava rejected the login ({last_error}). Check STRAVA_CLIENT_SECRET and STRAVA_REFRESH_TOKEN.")
 
 
-def fetch_activities(access_token):
-    after = int(time.time()) - DAYS_BACK * 86400
-    activities, page = [], 1
-    while True:
-        batch = http_json(f"https://www.strava.com/api/v3/athlete/activities?after={after}&per_page=200&page={page}",
-                          token=access_token)
-        if not batch:
-            return activities
-        activities += batch
-        page += 1
-
-
 # ---------- Encryption (decrypted in the browser with the same settings) ----------
+
+def side_key(password):
+    """One key for all the side files (older activities, routes), derived once
+    per build and once per visit in the browser. The salt is fixed per
+    password so a cached side file stays readable next to a newer page."""
+    salt = hashlib.sha256(b"trening-side-files:" + password.encode()).digest()[:16]
+    key = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=PBKDF2_ROUNDS).derive(password.encode())
+    return {"salt": b64(salt), "rounds": PBKDF2_ROUNDS}, key
+
+
+def encrypt_side(obj, key):
+    """12-byte IV followed by the AES-GCM ciphertext of the JSON."""
+    iv = os.urandom(12)
+    return iv + AESGCM(key).encrypt(iv, json.dumps(obj, separators=(",", ":")).encode(), None)
+
 
 def encrypt_page(html, password):
     salt, iv = os.urandom(16), os.urandom(12)
@@ -132,11 +133,19 @@ def load_encrypted(path, password, what):
 
 
 def load_settings(password):
-    """His own training settings (max heart rate), saved from the Settings page, over config.json."""
+    """His own settings, saved from the Settings page, over config.json: max
+    heart rate and a race goal. Every field is checked - a browser wrote it."""
     saved = load_encrypted(SETTINGS_FILE, password, "his saved settings")
     keep = {}
     if isinstance(saved.get("max_hr"), int) and 120 <= saved["max_hr"] <= 230:
         keep["max_hr"] = saved["max_hr"]
+    race = saved.get("race")
+    if isinstance(race, dict):
+        day, metres, goal = race.get("date"), race.get("m"), race.get("goal")
+        ok_day = isinstance(day, str) and len(day) == 10 and day[4] == "-" and day[7] == "-"
+        if ok_day and isinstance(metres, (int, float)) and 400 <= metres <= 250_000:
+            keep["race"] = {"name": str(race.get("name") or "Race")[:60], "date": day, "m": float(metres),
+                            "goal": int(goal) if isinstance(goal, (int, float)) and 60 <= goal <= 360_000 else None}
     return keep
 
 
@@ -318,10 +327,14 @@ self.addEventListener('fetch', e => {
 """
 
 
-def write_site(page_html, password, version):
+def write_site(page_html, password, version, side=None, key=None):
     if SITE.exists():
         shutil.rmtree(SITE)
     SITE.mkdir()
+    for rel, obj in (side or {}).items():
+        path = SITE / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(encrypt_side(obj, key))
     payload = json.dumps(encrypt_page(page_html, password))
     SITE.mkdir(exist_ok=True)
     (SITE / "index.html").write_text(SHELL.replace("__PAYLOAD__", payload), encoding="utf-8")
@@ -365,9 +378,8 @@ def main():
         if not secret:
             fail("STRAVA_CLIENT_SECRET secret is missing.")
         access_token = get_access_token(str(config["client_id"]), secret)
-        activities = fetch_activities(access_token)
-        runs = [a for a in activities if a.get("sport_type", a.get("type")) in report.RUN_TYPES]
-        details = strava_cache.collect(runs, access_token, secret)
+        activities = strava_cache.activity_list(access_token, secret)
+        details = strava_cache.collect(activities, access_token, secret)
 
     tz = ZoneInfo(config.get("timezone", "Europe/Oslo"))
     now = datetime.now(tz)
@@ -375,10 +387,11 @@ def main():
     config["repo"] = os.environ.get("GITHUB_REPOSITORY") or config.get("repo", "")
     version = now.strftime("%Y%m%d-%H%M%S")
     config["version"] = version
-    write_site(report.render(activities, config, details, load_notes(password), load_plan(password)),
-               password, version)
+    config["side"], key = side_key(password)
+    html, side = report.render_site(activities, config, details, load_notes(password), load_plan(password))
+    write_site(html, password, version, side, key)
     runs = sum(1 for a in activities if a.get("sport_type", a.get("type")) in report.RUN_TYPES)
-    print(f"Built dashboard: {len(activities)} activities, {runs} runs in the last {DAYS_BACK} days.")
+    print(f"Built dashboard: {len(activities)} activities ({runs} runs), {len(side) - 1} older ones in side files.")
 
 
 if __name__ == "__main__":

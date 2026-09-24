@@ -104,7 +104,139 @@
     };
   }
 
+  // Fitness (6-week load), fatigue (1-week) and form (the difference).
+  function fitSpec(rows) {
+    if (!rows || rows.length < 21) return null;
+    var xs = rows.map(function (r) { return dayNum(r[0]); });
+    var get = function (k) { return rows.map(function (r) { return r[k]; }); };
+    var fit = get(1), fat = get(2), form = get(3);
+    var all = fit.concat(fat, form), lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+    var fitY = function (a, b) {
+      var v = [];
+      for (var i = 0; i < xs.length; i++) if (xs[i] >= a && xs[i] <= b) v.push(fit[i], fat[i], form[i]);
+      if (!v.length) return null;
+      var l = Math.min(0, Math.min.apply(null, v)), h = Math.max.apply(null, v);
+      return [l - (h - l) * 0.06, h + (h - l) * 0.08];
+    };
+    return {
+      label: 'Fitness and form', h: roomy(230, 270), zoom: 'x', nearBy: 'x', left: 40,
+      x: { lo: xs[0], hi: xs[xs.length - 1], minSpan: 21, ticks: dayTicks, fmt: dayLabel },
+      y: { lo: Math.min(0, lo), hi: hi, fit: fitY, fmt: function (v) { return Math.round(v); } },
+      layers: [
+        { type: 'guide', y: 0, text: '' },
+        { type: 'line', xs: xs, ys: fit, cls: 'fit', area: true },
+        { type: 'line', xs: xs, ys: fat, cls: 'fat' },
+        { type: 'line', xs: xs, ys: form, cls: 'form' }
+      ],
+      tips: rows.map(function (r, i) {
+        var f = r[3], word = f > 5 ? 'fresh' : f < -20 ? 'very tired' : f < -8 ? 'tired - building' : 'balanced';
+        return { x: xs[i], y: fit[i], html: dayLabel(xs[i]) + '|Fitness ' + Math.round(r[1]) + ' · fatigue ' +
+          Math.round(r[2]) + '|Form ' + (f > 0 ? '+' : '') + Math.round(f) + ' - ' + word };
+      })
+    };
+  }
+
+  // Running kilometres through each year, this year in the accent.
+  var MONTH_START = [1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335];
+  function ytdSpec(years) {
+    var keys = Object.keys(years || {}).sort();
+    if (!keys.length) return null;
+    var now = keys[keys.length - 1], top = 1;
+    keys.forEach(function (y) { years[y].forEach(function (p) { top = Math.max(top, p[1]); }); });
+    var cls = function (y) { return y === now ? 'yr0' : y === keys[keys.length - 2] ? 'yr1' : 'yr2'; };
+    var weeks = years[now].map(function (p) { return p[0]; });
+    return {
+      label: 'Distance through the year', h: roomy(230, 270), zoom: 'x', nearBy: 'x', left: 44,
+      x: { lo: 0, hi: 366, minSpan: 28,
+           ticks: function (a, b, count) {
+             var k = Math.max(1, Math.ceil(12 / Math.max(count, 1))), out = [];
+             MONTH_START.forEach(function (d, i) { if (i % k === 0 && d >= a && d <= b) out.push(d); });
+             return out;
+           },
+           fmt: function (d) { return MONTHS[MONTH_START.indexOf(d)].slice(0, 3); } },
+      y: { lo: 0, hi: top * 1.08, fmt: function (v) { return Math.round(v); } },
+      layers: keys.map(function (y) {
+        return { type: 'line', xs: years[y].map(function (p) { return p[0]; }), ys: years[y].map(function (p) { return p[1]; }),
+                 cls: cls(y) };
+      }),
+      tips: weeks.map(function (d, i) {
+        var lines = keys.slice().reverse().map(function (y) {
+          var p = years[y].filter(function (q) { return q[0] <= d; }).pop();
+          return p ? y + ': ' + Math.round(p[1]) + ' km' : null;
+        }).filter(Boolean);
+        return { x: d, y: years[now][i][1], html: 'Day ' + d + ' of the year|' + lines.join('|') };
+      }),
+      legend: keys.slice().reverse().map(function (y) {
+        return '<span><i class="lf ' + cls(y) + '"></i>' + y + '</span>';
+      }).join('')
+    };
+  }
+
+  // His own 1-10 ratings from the run pages, coloured by the kind of session.
+  function rpeSpec() {
+    var pts = [];
+    acts.forEach(function (a) {
+      var n = NOTES[a.id];
+      if (n && +n.rpe >= 1 && +n.rpe <= 10) pts.push(a);
+    });
+    if (pts.length < 2) return null;
+    pts.sort(function (a, b) { return a.dt < b.dt ? -1 : 1; });
+    var xs = pts.map(function (a) { return dayNum(a.dt.slice(0, 10)); });
+    return {
+      label: 'How hard it felt', h: roomy(200, 230), zoom: 'x', left: 32,
+      x: { lo: xs[0] - 4, hi: xs[xs.length - 1] + 4, minSpan: 14, ticks: dayTicks, fmt: dayLabel },
+      y: { lo: 0.5, hi: 10.5, fmt: function (v) { return v; }, ticks: function () { return [2, 4, 6, 8, 10]; } },
+      layers: [{ type: 'hbands', bands: [{ lo: 6, hi: 7.5, key: 'threshold', label: 'Threshold feel' },
+                                         { lo: 1.5, hi: 4.5, key: 'easy', label: 'Easy feel' }] },
+               { type: 'dots', r: 5, pts: pts.map(function (a, i) { return { x: xs[i], y: +NOTES[a.id].rpe, fill: kindColour(a) }; }) }],
+      tips: pts.map(function (a, i) {
+        return { x: xs[i], y: +NOTES[a.id].rpe, html: esc(a.n) + '|' + dayLabel(xs[i]) + ' · felt ' + NOTES[a.id].rpe + '/10' +
+          (a.hr ? '|' + a.hr + ' bpm average' : '') };
+      })
+    };
+  }
+
+  /* ---------------- the training log, Strava style ---------------- */
+  var logWeeks = 12;
+  function drawLog() {
+    var host = document.getElementById('traininglog');
+    if (!host) return;
+    var byDay = {};
+    acts.forEach(function (a) { (byDay[a.dt.slice(0, 10)] = byDay[a.dt.slice(0, 10)] || []).push(a); });
+    var first = acts.length ? mondayOf(acts[acts.length - 1].dt.slice(0, 10)) : TODAY;
+    var monday = mondayOf(TODAY), html = '<div class="tl-row tl-head"><span></span>' +
+      DAYS_SHORT.map(function (d) { return '<span>' + d.charAt(0) + '</span>'; }).join('') + '<span>Week</span></div>';
+    for (var w = 0; w < logWeeks && monday >= first; w++, monday = addDays(monday, -7)) {
+      var km = 0, secs = 0, cells = '';
+      for (var i = 0; i < 7; i++) {
+        var day = addDays(monday, i), list = (byDay[day] || []).slice().sort(function (a, b) { return b.s - a.s; });
+        var total = list.reduce(function (t, a) { return t + a.s; }, 0);
+        list.forEach(function (a) { secs += a.s; if (isRun(a)) km += a.m / 1000; });
+        if (!list.length) { cells += '<span class="tl-day' + (day === TODAY ? ' today' : '') + '"><i class="tl-none"></i></span>'; continue; }
+        var size = Math.round(10 + 26 * Math.min(1, Math.sqrt(total / 7200)));
+        var main = list[0], tip = list.map(function (a) { return kindName(a) + ' ' + hms(a.s); }).join(' + ');
+        cells += '<span class="tl-day' + (day === TODAY ? ' today' : '') + '"><a href="#/run/' + main.id + '" title="' + esc(tip) +
+          '" aria-label="' + esc(dayLabel(dayNum(day)) + ': ' + tip) + '" style="width:' + size + 'px;height:' + size +
+          'px;background:' + kindColour(main) + '">' + (list.length > 1 ? '<b>' + list.length + '</b>' : '') + '</a></span>';
+      }
+      html += '<div class="tl-row' + (w === 0 ? ' now' : '') + '"><span class="tl-date">' + dayLabel(dayNum(monday)) + '</span>' + cells +
+        '<span class="tl-sum"><b>' + km.toFixed(km >= 100 ? 0 : 1) + '</b> km<small>' +
+        (secs >= 3600 ? Math.floor(secs / 3600) + 'h ' + pad(Math.floor(secs % 3600 / 60)) + 'm' : Math.round(secs / 60) + ' min') +
+        '</small></span></div>';
+    }
+    var more = monday >= first;
+    host.innerHTML = html + (more ? '<button type="button" class="btn small ghost tl-more">Show 12 more weeks</button>' : '') +
+      '<div class="flegend"><span><i class="lf" style="background:var(--z-easy)"></i>Easy & long</span>' +
+      '<span><i class="lf" style="background:var(--z-threshold)"></i>Threshold</span>' +
+      '<span><i class="lf" style="background:var(--bar)"></i>Other sports</span></div>';
+    var btn = host.querySelector('.tl-more');
+    if (btn) btn.addEventListener('click', function () { logWeeks += 12; drawLog(); });
+  }
+
   var PROG_SPECS = {
+    fit: function () { return fitSpec(PROG.fit); },
+    ytd: function () { return ytdSpec(PROG.ytd); },
+    rpe: rpeSpec,
     load: function () { return PROG.load && colsSpec(PROG.load, 'Weekly training load'); },
     dist: function () { return PROG.dist && colsSpec(PROG.dist, 'Weekly distance (km)'); },
     shr: function () { return scatterSpec(PROG.shr || []); },
@@ -162,6 +294,7 @@
       box.innerHTML = '<div class="cv"></div><div class="cgrab" role="button" tabindex="0" aria-label="Open ' +
         esc(spec.label) + ' full screen"></div>';
       var p = new Plot(box.querySelector('.cv'), spec), grab = box.querySelector('.cgrab');
+      if (spec.legend && key === 'ytd') document.getElementById('ytdlegend').innerHTML = spec.legend;
       watchSize(p);
       p.draw();
       hands(grab, [p], {
@@ -176,3 +309,4 @@
     });
   }
   drawProgress();
+  drawLog();

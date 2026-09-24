@@ -3,8 +3,27 @@
    * sheet and the chart tooltip. The files in web/ are concatenated in the order
    * report.py lists them, inside one function, so they share these names.
    */
-  var runs = window.RUNS || [], conf = window.CONF || {}, byId = {};
-  runs.forEach(function (r) { byId[r.id] = r; });
+  // Every activity, newest first. Those from the last 140 days carry their
+  // streams and laps; older ones (`x: 1`) load theirs on demand (loadDetail).
+  var acts = window.ACTS || [], conf = window.CONF || {}, byId = {};
+  acts.forEach(function (r) { byId[r.id] = r; });
+  var RUN_TY = { Run: 1, TrailRun: 1, VirtualRun: 1 }, FOOT_TY = { Run: 1, TrailRun: 1, VirtualRun: 1, Walk: 1, Hike: 1 };
+  var runs = acts.filter(function (a) { return RUN_TY[a.ty]; });
+  function isRun(a) { return !!RUN_TY[a.ty]; }
+  function onFoot(a) { return !!FOOT_TY[a.ty]; }
+  var KINDS = { threshold: 'Threshold', easy: 'Easy', long: 'Long run', race: 'Race' };
+  // What an activity is called: the kind of run, else the sport.
+  function kindName(a) {
+    if (a.k) return KINDS[a.k];
+    return (conf.sports || {})[a.ty] || String(a.ty || 'Workout').replace(/([a-z])([A-Z])/g, '$1 $2');
+  }
+  // Its colour: the zone the session belongs in; other sports stay neutral.
+  function kindColour(a) {
+    return a.k === 'threshold' ? 'var(--z-threshold)' : a.k === 'race' ? 'var(--z-hard)'
+      : a.k ? 'var(--z-easy)' : 'var(--bar)';
+  }
+  // An easy or long run that was run in the grey zone.
+  function tooHard(a) { return (a.k === 'easy' || a.k === 'long') && a.hr && a.hr >= Math.round(conf.maxhr * 0.75); }
 
   // ---------- small helpers ----------
   function pad(n) { return (n < 10 ? '0' : '') + n; }
@@ -33,6 +52,9 @@
   function mondayOf(s) { var d = parseYmd(s); return addDays(s, -((d.getDay() + 6) % 7)); }
   function weekdayOf(s) { return (parseYmd(s).getDay() + 6) % 7; }
   function daysBetween(a, b) { return Math.round((parseYmd(b) - parseYmd(a)) / 864e5); }
+  var DAYS_SHORT = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September',
+    'October', 'November', 'December'];
   var TODAY = conf.today || ymd(new Date());
   (function () {                               // the build's "today" is stale by the evening; use the phone's
     var now = ymd(new Date());
@@ -211,6 +233,51 @@
     'offline': 'Saved on this device. No connection to GitHub right now - it syncs next time.',
     'http': 'Saved on this device. GitHub would not accept the change.'
   };
+
+  /* ---------- side files: older activities and all routes ----------
+   * Encrypted with the dashboard password like the page (see build_site.py:
+   * one key for all of them, derived once per visit). Fetched when needed and
+   * kept by the service worker, so an activity opened once also opens offline.
+   */
+  var sideKeyP = null;
+  function sideKey() {
+    if (!sideKeyP) {
+      var pw = store.password();
+      if (!pw || !conf.side) return Promise.reject(new Error('locked'));
+      sideKeyP = keyFor(pw, b64.dec(conf.side.salt), conf.side.rounds)
+        .catch(function (e) { sideKeyP = null; throw e; });
+    }
+    return sideKeyP;
+  }
+  async function loadSide(path) {
+    var key = await sideKey();
+    var r = await fetch(path);
+    if (!r.ok) throw new Error('missing ' + path);
+    var buf = new Uint8Array(await r.arrayBuffer());
+    var plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: buf.slice(0, 12) }, key, buf.slice(12));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+  // An activity with its streams, laps and splits, whether they came with the page or not.
+  var detailP = {};
+  function loadDetail(a) {
+    if (!a || a.t || !a.x) return Promise.resolve(a);
+    if (!detailP[a.id]) {
+      detailP[a.id] = loadSide('a/' + a.id + '.bin').then(function (det) { return Object.assign(a, det); })
+        .catch(function (e) { delete detailP[a.id]; throw e; });
+    }
+    return detailP[a.id];
+  }
+  // Every route, all the way back - for the Map tab.
+  var routesP = null;
+  function loadRoutes() {
+    if (!routesP) {
+      routesP = loadSide('routes.bin').then(function (all) {
+        Object.keys(all).forEach(function (id) { if (byId[id] && !byId[id].poly) byId[id].poly = all[id]; });
+        return all;
+      }).catch(function (e) { routesP = null; throw e; });
+    }
+    return routesP;
+  }
 
   // The floating tooltip the charts use (see tipAt in charts.js).
   var tipEl = document.getElementById('tip');

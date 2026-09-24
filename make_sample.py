@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 import strava_cache
 
 random.seed(7)
-DAYS_BACK = 140
+DAYS_BACK = 140                   # the plan-shaped part; older history is sparser
 TODAY = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 HOME = (62.4722, 6.1495)          # a loop near Ålesund, so the map has something to draw
 NAMES = {
@@ -115,7 +115,82 @@ def simulate(kind, minutes, reps=None):
     return streams, laps
 
 
+SHOES = [{"id": "g100", "name": "Blue daily trainer"}, {"id": "g200", "name": "Light tempo shoe"},
+         {"id": "g300", "name": "Old trail shoe"}]
+EFFORTS = [("400m", 400), ("1/2 mile", 804.67), ("1K", 1000), ("1 mile", 1609.34), ("2 mile", 3218.69),
+           ("5K", 5000), ("10K", 10000), ("15K", 15000), ("Half-Marathon", 21097.5)]
+
+
+def best_efforts(streams):
+    """Fastest stretch of each standard distance, like Strava's best efforts."""
+    t, d = streams["time"]["data"], streams["distance"]["data"]
+    out = []
+    for name, metres in EFFORTS:
+        if d[-1] < metres:
+            break
+        best, j = None, 0
+        for i in range(len(d)):
+            while j < len(d) and d[j] - d[i] < metres:
+                j += 1
+            if j == len(d):
+                break
+            dt = t[j] - t[i]
+            best = dt if best is None or dt < best else best
+        out.append({"name": name, "elapsed_time": best, "distance": metres,
+                    "pr_rank": random.choice([None, None, None, 1, 2, 3])})
+    return out
+
+
+def simulate_other(sport, minutes):
+    """A hike, walk or ride: steady effort, cadence per the sport."""
+    speed, hr, cad = {"Hike": (1.15, 118, 52), "Walk": (1.45, 104, 56), "Ride": (6.4, 128, 84)}[sport]
+    time_s, dist, hrs, sp, alt, cads, metres, beat = [], [], [], [], [], [], 0.0, 90.0
+    for t in range(int(minutes * 60)):
+        climb = math.sin(t / 900)
+        v = max(speed * (1 - 0.25 * climb if sport == "Hike" else 1) + random.gauss(0, speed * 0.04), 0.3)
+        beat += (hr + 14 * climb - beat) * 0.02 + random.gauss(0, 0.5)
+        metres += v
+        time_s.append(t); dist.append(round(metres, 1)); sp.append(round(v, 2)); hrs.append(round(beat))
+        alt.append(round(120 + (380 if sport == "Hike" else 60) * (1 - math.cos(t / (minutes * 60) * 2 * math.pi)) / 2, 1))
+        cads.append(round(cad + random.gauss(0, 1.5)))
+    return {k: {"data": v} for k, v in (("time", time_s), ("distance", dist), ("heartrate", hrs),
+                                        ("velocity_smooth", sp), ("altitude", alt), ("cadence", cads))}
+
+
+def summary(rid, name, sport, start, streams, gear=None, workout_type=None, with_poly=True):
+    data = streams["distance"]["data"]
+    moving, distance = len(data), data[-1]
+    beats = streams["heartrate"]["data"]
+    out = {
+        "id": rid, "name": name, "type": sport, "sport_type": sport,
+        "start_date": (start - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "start_date_local": start.strftime("%Y-%m-%dT%H:%M:%S"),
+        "distance": round(distance, 1), "moving_time": moving,
+        "elapsed_time": moving + random.randint(0, 240),
+        "total_elevation_gain": round(max(streams["altitude"]["data"]) - min(streams["altitude"]["data"]) + random.uniform(10, 60), 1),
+        "average_heartrate": round(sum(beats) / len(beats), 1), "max_heartrate": float(max(beats)),
+        "average_speed": round(distance / moving, 3),
+        "max_speed": round(max(streams["velocity_smooth"]["data"]), 3),
+        "average_cadence": round(sum(streams["cadence"]["data"]) / moving, 1),
+        "has_heartrate": True, "kudos_count": random.randint(0, 6),
+    }
+    if gear:
+        out["gear_id"] = gear["id"]
+    if workout_type:
+        out["workout_type"] = workout_type
+    if with_poly:
+        out["map"] = {"id": f"a{rid}", "summary_polyline": encode_polyline(route(distance, rid % 7 if sport == "Run" else rid))}
+    return out
+
+
+def detail(streams, laps, gear, sport):
+    return {"laps": laps, "best_efforts": best_efforts(streams) if sport == "Run" else [],
+            "gear": dict(gear, distance=0) if gear else None, "calories": random.randint(300, 900),
+            "device_name": "Garmin Forerunner 265", "average_temp": random.randint(4, 22)}
+
+
 activities, details, idx = [], {}, 0
+# ---- the plan-shaped last 140 days
 day = TODAY - timedelta(days=DAYS_BACK)
 while day <= TODAY:
     kind = {1: "threshold", 3: "easy", 6: "long"}.get(day.weekday())
@@ -130,35 +205,53 @@ while day <= TODAY:
                "long": random.randint(62, 85)}[kind]
     reps = random.choice([(6, 180, 60), (5, 300, 60), (4, 420, 60), (3, 600, 90)])
     streams, laps = simulate(kind, minutes, reps)
-    data = streams["distance"]["data"]
-    moving, distance = len(data), data[-1]
-    beats = streams["heartrate"]["data"]
     rid = 10_000_000 + idx
-    activities.append({
-        "id": rid, "name": random.choice(NAMES[kind]), "type": "Run", "sport_type": "Run",
-        "start_date_local": start.strftime("%Y-%m-%dT%H:%M:%S"),
-        "distance": round(distance, 1), "moving_time": moving,
-        "elapsed_time": moving + random.randint(0, 240),
-        "total_elevation_gain": round(random.uniform(30, 190), 1),
-        "average_heartrate": round(sum(beats) / len(beats), 1), "max_heartrate": float(max(beats)),
-        "average_speed": round(distance / moving, 3),
-        "max_speed": round(max(streams["velocity_smooth"]["data"]), 3),
-        "average_cadence": round(sum(streams["cadence"]["data"]) / moving, 1),
-        "kudos_count": random.randint(0, 6),
-        "map": {"id": f"a{rid}", "summary_polyline": encode_polyline(route(distance, rid))},
-    })
-    details[rid] = strava_cache._shape(streams, laps)
+    gear = SHOES[1] if kind == "threshold" else SHOES[0]
+    activities.append(summary(rid, random.choice(NAMES[kind]), "Run", start, streams, gear))
+    details[rid] = strava_cache._shape(streams, detail(streams, laps, gear, "Run"), "Run")
     idx += 1
     day += timedelta(days=1)
 
-# a few non-runs, so the filtering gets exercised too
-for n, (sport, mins) in enumerate([("Ride", 75), ("WeightTraining", 45), ("Walk", 30)]):
-    start = TODAY - timedelta(days=4 + n * 9) + timedelta(hours=18)
-    activities.append({"id": 20_000_000 + n, "name": sport, "type": sport, "sport_type": sport,
-                       "start_date_local": start.strftime("%Y-%m-%dT%H:%M:%S"),
-                       "distance": 20000.0 if sport == "Ride" else 2000.0,
-                       "moving_time": mins * 60, "elapsed_time": mins * 60,
-                       "total_elevation_gain": 50.0, "average_heartrate": 120.0})
+# ---- two years of older history: fewer runs, hikes and rides, not all detail fetched yet
+day = TODAY - timedelta(days=760)
+while day < TODAY - timedelta(days=DAYS_BACK):
+    roll = random.random()
+    start = day + timedelta(hours=random.choice([8, 12, 17]), minutes=random.randint(0, 50))
+    rid = 30_000_000 + idx
+    idx += 1
+    if day.weekday() in (2, 5) and roll < 0.75:
+        kind = "easy" if roll < 0.55 else "long"
+        streams, laps = simulate(kind, random.randint(30, 50) if kind == "easy" else random.randint(60, 80))
+        gear = SHOES[2] if day < TODAY - timedelta(days=400) else SHOES[0]
+        activities.append(summary(rid, random.choice(NAMES[kind]), "Run", start, streams, gear))
+        if random.random() < 0.7:
+            details[rid] = strava_cache._shape(streams, detail(streams, laps, gear, "Run"), "Run")
+    elif day.weekday() == 6 and roll < 0.35:
+        sport = random.choice(["Hike", "Hike", "Walk"])
+        streams = simulate_other(sport, random.randint(90, 240) if sport == "Hike" else random.randint(30, 60))
+        activities.append(summary(rid, {"Hike": "Fjelltur", "Walk": "Walk"}[sport], sport, start, streams))
+        if random.random() < 0.7:
+            details[rid] = strava_cache._shape(streams, detail(streams, [], None, sport), sport)
+    elif day.weekday() == 0 and roll < 0.2:
+        streams = simulate_other("Ride", random.randint(45, 100))
+        activities.append(summary(rid, "Sykkeltur", "Ride", start, streams))
+        details[rid] = strava_cache._shape(streams, detail(streams, [], None, "Ride"), "Ride")
+    day += timedelta(days=1)
+
+# a few recent non-runs, so the filtering gets exercised too (one without a route or detail)
+for n, (sport, mins) in enumerate([("Hike", 150), ("WeightTraining", 45), ("Walk", 30)]):
+    start = TODAY - timedelta(days=4 + n * 9) + timedelta(hours=11)
+    rid = 20_000_000 + n
+    if sport == "WeightTraining":
+        activities.append({"id": rid, "name": "Styrke", "type": sport, "sport_type": sport,
+                           "start_date": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           "start_date_local": start.strftime("%Y-%m-%dT%H:%M:%S"), "distance": 0.0,
+                           "moving_time": mins * 60, "elapsed_time": mins * 60, "total_elevation_gain": 0.0,
+                           "average_heartrate": 112.0, "max_heartrate": 150.0})
+        continue
+    streams = simulate_other(sport, mins)
+    activities.append(summary(rid, {"Hike": "Fjelltur", "Walk": "Walk"}[sport], sport, start, streams))
+    details[rid] = strava_cache._shape(streams, detail(streams, [], None, sport), sport)
 
 activities.sort(key=lambda a: a["start_date_local"], reverse=True)
 with open("sample_activities.json", "w", encoding="utf-8") as f:
@@ -166,4 +259,4 @@ with open("sample_activities.json", "w", encoding="utf-8") as f:
 with open("sample_detail.json", "w", encoding="utf-8") as f:
     json.dump(details, f, separators=(",", ":"))
 print(f"Wrote sample_activities.json ({len(activities)} activities) "
-      f"and sample_detail.json ({len(details)} runs).")
+      f"and sample_detail.json ({len(details)} with detail).")
