@@ -34,21 +34,37 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   build** – a new run costs 2 (streams + laps); a run cached before cadence existed (`cadv` missing) is topped up
   with 1 call, after new runs. Stops early when Strava's rate-limit headers run low. Cadence is stored doubled
   (Strava counts one foot).
-- `report.py` – builds what is fixed at build time: the numbers, the Python-drawn SVG charts (Progress), and
-  the page skeletons, then inlines the browser code. Six pages – Home, Plan, Runs, Map, Progress, Settings –
+- `report.py` – builds what is fixed at build time: the numbers and the page skeletons, then inlines the
+  browser code. It draws **no charts** – Progress gets empty `.pc` slots (`chart_slot()`) plus the numbers
+  as `window.PROG` (`progress_payload()`; tooltip texts `Title|line|line`, already HTML-escaped). Six pages – Home, Plan, Runs, Map, Progress, Settings –
   behind a hash router (`#/home`, `#/run/<id>`, …); switching needs no network. Data reaches the browser as
   `window.CONF`, `window.RUNS` (compact per-run JSON: streams `t d hs sp al cd`, laps `laps`, splits `sl`,
-  zone seconds `zs`, kind `k`, effort `re`), `window.NOTES` and `window.PLAN`.
+  zone seconds `zs`, kind `k`, effort `re`), `window.NOTES`, `window.PLAN` and `window.PROG`.
   Per-run numbers worked out here: `run_kind()` (**easy / long / threshold, judged by ≥ 8 min at threshold
   or above, not by average HR** – an interval session's average includes warm-up and jogs), `effort_of()`
   (Edwards' TRIMP from the histogram), metres per heartbeat, `rep_pace()` (laps at ≥ 82% HRmax),
   `decoupling()` (Pa:HR, first 10 min dropped).
 - **`web/`** – all browser code as real files, inlined by `report.py` in the order of `APP_FILES` inside **one
   function scope** (a helper in `core.js` is visible to every later file). `core.js` (formatting, dates in
-  `YYYY-MM-DD`, `prefs`, storage, AES helpers, `pullEncrypted` / `putEncrypted`, the sheet, tooltips),
-  `charts.js` (run charts and the zoomable pop-out), `map.js`, `run.js` (run page + map explorer),
-  `mappage.js`, `plan.js` (Plan page and Home's plan cards), `settings.js`, `boot.js` (start-up and the
-  per-page hook the router calls), `router.js` (separate), `app.css` (the design system).
+  `YYYY-MM-DD`, `prefs`, storage, AES helpers, `pullEncrypted` / `putEncrypted`, the sheet), `charts.js`
+  (the chart engine and a run's charts), `map.js`, `run.js` (run page + map explorer), `mappage.js`,
+  `progress.js` (the Progress charts), `plan.js` (Plan page and Home's plan cards), `settings.js`, `boot.js`
+  (start-up and the per-page hook the router calls), `router.js` (separate), `app.css` (the design system).
+- **Charts (rebuilt 24.09.2026)** – all drawn in the browser by one small engine in `charts.js`, **at the
+  pixel size they are shown** (SVG width = box width, redrawn by a ResizeObserver), so text is real 11.5 px
+  and dots are real dots. The old way – a 760-wide drawing scaled down to a phone – made labels ~5 px and was
+  what he called hard to read; do not go back to it. A chart is a `spec` (x/y axes, `layers`: hbands, vbands,
+  line (+area), dots, cols, guide; `tips` for tooltips) drawn by a `Plot` for a `view`; zoom only changes the
+  view. `hands()` wires gestures on a transparent overlay that is never redrawn (a pinch survives redraws):
+  **tap = open full screen** (`openChartWindow`); one finger reads (crosshair + readout on run charts, which
+  also moves the map marker; nearest-point tooltip on Progress); **two fingers pinch/drag to zoom and move;
+  double-tap resets**; mouse: hover reads, wheel/trackpad pinch zooms, drag moves, double-click resets.
+  No zoom buttons and no "Bigger" buttons – he asked for both to go. Inline Progress charts ignore a resting
+  finger (`touchRead: false`) so scrolling does not flash tooltips.
+  Run charts are against **distance** (km ticks), y refits to what is in view: heart rate over zone washes
+  with the zone edges as ticks, pace inverted, **cadence as dots coloured red → amber → green**
+  (`cadColour`, `CAD_LOW` 160 / `CAD_GOOD` 170, legend beside it; same colours on Progress' cadence),
+  elevation as an area. Chart inks are tokens: `--c-hr`, `--c-elev`, `--c-mid`, `--bar`, `--zwash`.
 - **Maps – MapLibre GL 6.11.1, vendored** (settled 23.09.2026, when he asked for 3D and "any safe and free
   option"). `vendor/` holds unchanged copies from npm, pinned and checked against npm's published integrity
   hash; **`vendor/verify.sh` re-downloads and re-checks them.** Loaded only when a map is first shown, served
@@ -57,8 +73,11 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   World Imagery for *Satellite*, AWS Open Data terrain tiles (terrarium) for hillshading and 3D ground.
   `RunMap` (map.js) is one run: route from `summary_polyline`, five styles (Solid, Glow, and `line-gradient`s
   for heart rate / pace / elevation, stops placed at each stream sample's share of the distance), km markers,
-  start/finish, a cursor marker. The run page shows a still preview; tapping opens a full-screen explorer with
-  3D, basemap and route-style menus and a profile strip you slide to move the marker; moving across the run's
+  start/finish, a cursor marker. The run page shows a still preview (only a 3D shortcut and the legend on it);
+  tapping it opens a full-screen explorer with 3D, basemap and route-style menus and a profile strip you slide
+  to move the marker. **Tilting with two fingers switches 3D on by itself, laying it flat switches it off**
+  (`autoThree()`, used by the explorer and the Map tab; only user gestures count, via `originalEvent` on
+  `movestart`, so the 3D button's own camera moves do not flip it; max pitch 72°); moving across the run's
   charts moves the marker on the preview. Frame the route on **`style.load`, never `load`** (`load` waits for
   every tile and may never come on a poor connection). In 3D, frame as if flat and then tilt – MapLibre's own
   tilted fit backs far off. With no signal the basemap falls back to a blank style after 9 s and the route
@@ -83,9 +102,7 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   hard crimson. **The zone colours were chosen with the `dataviz` skill's validator** (colour-blind
   separation and contrast, both modes); change one only by re-running it. Amber sits under 3:1 on white, so a
   zone colour always ships with its name beside it. All text tokens pass 4.5:1. Typeface: Barlow Semi
-  Condensed (vendored, OFL) for headings and numbers, the system font for text. Chart dots are zero-length
-  lines with round caps and `vector-effect: non-scaling-stroke`, so they stay 9 px on a phone instead of
-  shrinking with the SVG (`dot_mark()`); lines, grid and axes are non-scaling too.
+  Condensed (vendored, OFL) for headings and numbers, the system font for text.
 - **App behaviour (PWA).** `site/sw.js` is written by every build with a fresh `VERSION`. It precaches the
   shell, serves same-origin requests network-first, and keeps the vendored files in a separate
   `trening-vendor` cache (cache-first, survives new builds). The dashboard shows **"Update ready · Reload"**
@@ -144,11 +161,12 @@ Built (as of 23.09.2026):
 2. **Plan** – week/month calendar with drag-to-move, edit, add and remove, synced via `plan.enc`; his own
    plan (see "Your role"); ISO week numbers; a "How this plan works" card with Bakken's key points; HR zones.
 3. **Runs** – list by month with a zone stripe; run page with map preview + 3D explorer, stats (incl. cadence
-   and effort), HR / pace / cadence / elevation charts (pop-out, zoom, pinch), laps, splits, time in zones, notes.
+   and effort), HR / pace / cadence / elevation charts against distance (tap to open, pinch to zoom), laps,
+   splits, time in zones, notes.
 4. **Map** – heat map and routes of every run, filters, tap to open, 3D.
 5. **Progress** – effort this week vs usual range, easy share, metres per beat, cadence; weekly training load;
    speed vs heart rate; aerobic efficiency; time in zones; threshold rep pace; long-run decoupling; cadence;
-   weekly distance.
+   weekly distance. Every chart opens full screen and zooms.
 6. **Settings** – appearance, default basemap and route line, max HR, GitHub token, about/update.
 
 Maps history, so it is not re-litigated: the hand-drawn raster map was replaced by MapLibre on 23.09.2026.

@@ -110,13 +110,13 @@
       return '<section class="card"><h2>Heart rate</h2><p class="sub">No heart-rate detail stored for this ' +
         'run yet. The hourly update fetches a few runs at a time.</p></section>';
     }
-    return '<section class="card"><h2>During the run' +
-      '<button type="button" class="more" id="chartbig">Bigger ⤢</button></h2>' +
-      '<p class="readout" id="readout"></p>' +
-      '<div class="charts" id="charts" data-count="' + run.hs.length + '">' +
-      chartsHTML(run, 0, run.hs.length, false) + '</div>' +
-      '<p class="hint">Move across the charts and the marker follows on the map. Tap to open them bigger, ' +
-      'where you can zoom into a single interval.</p></section>';
+    return '<section class="card"><h2>During the run</h2>' +
+      '<p class="readout" id="readout">Slide along the charts to read any point · tap to open</p>' +
+      '<div class="charts" id="charts"></div>' +
+      '<p class="hint">The marker on the map follows your finger. Open the charts to zoom into a single ' +
+      'interval.' + ((run.cd || []).some(function (v) { return v; }) ? ' Cadence dots are red under ' + CAD_LOW +
+      ' steps a minute, amber up to ' + CAD_GOOD + ' and green above - it rises with speed, so easy running ' +
+      'sits lower than threshold.' : '') + '</p></section>';
   }
 
   // ---------- the map preview on the run page ----------
@@ -124,12 +124,12 @@
     return '<div class="runmap" id="runmap" role="button" tabindex="0" aria-label="Open the map of this run">' +
       '<div class="rm-canvas"></div>' +
       '<button type="button" class="rm-3d" data-three="1" aria-label="Open in 3D">3D</button>' +
-      '<span class="rm-open">' + micon('expand') + 'Explore map</span>' +
       '<div class="mlegend small" hidden></div></div>';
   }
 
   /* ---------------- the full-screen map explorer ----------------
-   * Drag, pinch, and in 3D twist with two fingers to turn and tilt. The strip
+   * Drag and pinch; twist with two fingers to turn. Slide two fingers up to tilt and the ground rises
+   * into 3D by itself (see autoThree); lay it flat again and it is a plain map. The strip
    * at the bottom is the run's profile: slide along it and the marker walks
    * the route; tap the route and the strip jumps to that point.
    * -------------------------------------------------------------- */
@@ -231,7 +231,11 @@
         legend.innerHTML = legendHTML(drawn.legend);
         mark('style', drawn.style.id);
       },
-      onPick: function (f) { at(sampleAt(run, f)); }
+      onPick: function (f) { at(sampleAt(run, f)); },
+      onThree: function (on) {
+        threeBtn.classList.toggle('on', on);
+        threeBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      }
     });
     threeBtn.classList.toggle('on', !!three);
     threeBtn.setAttribute('aria-pressed', three ? 'true' : 'false');
@@ -338,27 +342,8 @@
 
     var box = document.getElementById('charts');
     if (box) {
-      var out = document.getElementById('readout');
-      out.dataset.idle = 'Move across the chart to read any point.';
-      out.textContent = out.dataset.idle;
-      box.dataset.from = 0;
-      attachProbe(box, box, out, run, function (j) {
+      runCharts(box, document.getElementById('readout'), run, function (j) {
         if (preview) preview.showAt(j == null ? null : fractionOfSample(run, j));
-      });
-      var slid = 0, startX = 0;
-      box.addEventListener('touchstart', function (e) {
-        slid = 0; startX = e.touches[0].clientX;
-      }, { passive: true });
-      box.addEventListener('touchmove', function (e) {
-        slid = Math.max(slid, Math.abs(e.touches[0].clientX - startX));
-      }, { passive: true });
-      box.addEventListener('click', function () {
-        if (slid > 10) { slid = 0; return; }     // that was a scrub, not a tap
-        openCharts(run);
-      });
-      document.getElementById('chartbig').addEventListener('click', function (e) {
-        e.stopPropagation();
-        openCharts(run);
       });
     }
     wireNotes(run);

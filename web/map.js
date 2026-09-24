@@ -121,6 +121,25 @@
     }
   }
 
+  /*
+   * Tilt the map with two fingers (or drag with the right mouse button) and
+   * the ground rises into 3D by itself; lay it flat again and it is a plain
+   * map. `get()` says whether 3D is on, `set(on)` is told when it flips.
+   * Only your own gestures count: the 3D button and the framing move the
+   * camera too, and those must not switch anything.
+   */
+  function autoThree(map, get, set) {
+    var yours = false;
+    map.on('movestart', function (e) { yours = !!(e && e.originalEvent); });
+    map.on('pitch', function () {
+      if (yours && !get() && map.getPitch() > 6) { setGround3D(map, true); set(true); }
+    });
+    map.on('moveend', function () {
+      if (yours && get() && map.getPitch() < 2) { setGround3D(map, false); set(false); }
+      yours = false;
+    });
+  }
+
   // The map credits stay folded into their (i) button - MapLibre unfolds them
   // whenever the sources change - unless you open them yourself.
   function keepCreditsFolded(map, el) {
@@ -392,7 +411,7 @@
         container: el, style: styleFor(self.basemap),
         bounds: g.bounds, fitBoundsOptions: { padding: opts.padding || 36 },
         interactive: opts.interactive !== false, attributionControl: { compact: true },
-        maxPitch: self.three ? 78 : 0, fadeDuration: 150, dragRotate: true, pitchWithRotate: true,
+        maxPitch: 72, fadeDuration: 150, dragRotate: true, pitchWithRotate: true,
         pixelRatio: Math.min(window.devicePixelRatio || 1, 2)
       });
       var loaded = false, fellBack = false;
@@ -416,6 +435,12 @@
         if (!self.placed) { self.placed = true; self.fit(false); }
       });
       keepCreditsFolded(map, el);
+      if (opts.interactive !== false) {
+        autoThree(map, function () { return self.three; }, function (on) {
+          self.three = on;
+          if (opts.onThree) opts.onThree(on);
+        });
+      }
       map.on('click', function (e) {
         if (!self.onPick) return;
         var near = map.queryRenderedFeatures(e.point, { layers: ['route-hit'] });
@@ -461,7 +486,6 @@
     setGround3D(this.map, on);
     if (on) this.map.easeTo({ pitch: 60, bearing: this.map.getBearing() || -18, duration: 900 });
     else this.map.easeTo({ pitch: 0, bearing: 0, duration: 700 });
-    this.map.setMaxPitch(on ? 78 : 0);                 // flat means flat: no accidental tilting
   };
   // Put the marker a fraction of the way along the run, or remove it with null.
   RunMap.prototype.showAt = function (f) {
@@ -481,8 +505,7 @@
     layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
     line: '<path d="M4 18c3-8 6 2 9-6s5-4 7-6"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="6" r="1.6"/>',
     fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
-    compass: '<path d="m12 3 3.5 9h-7z" fill="currentColor"/><path d="m12 21-3.5-9h7z"/>',
-    expand: '<path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7"/>'
+    compass: '<path d="m12 3 3.5 9h-7z" fill="currentColor"/><path d="m12 21-3.5-9h7z"/>'
   };
   function micon(name) {
     return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" ' +
