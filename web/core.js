@@ -212,22 +212,5 @@
     'http': 'Saved on this device. GitHub would not accept the change.'
   };
 
-  /* ---------- tooltips on charts: data-tip="Title|line|line" on any element ---------- */
+  // The floating tooltip the charts use (see tipAt in charts.js).
   var tipEl = document.getElementById('tip');
-  function showTip(g, x, y) {
-    var parts = g.dataset.tip.split('|');
-    tipEl.innerHTML = '<b>' + parts[0] + '</b>' + parts.slice(1).join('<br>');
-    tipEl.style.display = 'block';
-    tipEl.style.left = Math.max(8, Math.min(x + 14, window.innerWidth - tipEl.offsetWidth - 8)) + 'px';
-    tipEl.style.top = Math.max(8, y + 14) + 'px';
-  }
-  document.addEventListener('mousemove', function (e) {
-    var g = e.target.closest && e.target.closest('[data-tip]');
-    if (g) showTip(g, e.clientX, e.clientY); else tipEl.style.display = 'none';
-  });
-  document.addEventListener('touchstart', function (e) {
-    var g = e.target.closest && e.target.closest('[data-tip]');
-    if (!g) { tipEl.style.display = 'none'; return; }
-    var t = e.touches[0];
-    showTip(g, t.clientX, t.clientY - 70);
-  }, { passive: true });

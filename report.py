@@ -6,15 +6,15 @@ Progress, Settings - and a menu (bottom tab bar on a phone, sidebar on a
 desktop). It is shipped as one encrypted file, so switching pages is instant
 and works offline once opened.
 
-This file builds what is fixed at build time: the numbers, the Python-drawn
-SVG charts and the page skeletons. Everything interactive - the run page,
-maps, the plan calendar, settings - is browser code in web/*.js, which this
-file inlines in the order of APP_FILES.
+This file builds what is fixed at build time: the numbers and the page
+skeletons. Everything drawn or interactive - charts, the run page, maps, the
+plan calendar, settings - is browser code in web/*.js, which this file
+inlines in the order of APP_FILES.
 
 Layout of this file:
   1. Settings and small helpers (zones, effort, efficiency, decoupling)
   2. The training plan (the standard plan, as data the Plan page edits)
-  3. Charts (hand-built inline SVG)
+  3. Chart data (the charts are drawn in the browser)
   4. The pages
   5. Shell: menu, and the assembly of CSS and scripts
 """
@@ -287,136 +287,37 @@ def coach_note(run, max_hr):
             f"part of the plan - the hard days are meant to be controlled, not all-out.")
 
 
-# ----------------------------------------------------------------- 3. charts
+# ------------------------------------------------------------- 3. chart data
 
-def dot_mark(cx, cy, cls="pt"):
-    """A data dot that stays the same size on screen however far the chart is
-    scaled: a zero-length line with a round cap and a non-scaling stroke. A
-    circle's radius would shrink with the chart and end up ~2 px on a phone.
-    Includes a surface-coloured ring and a 28 px touch target."""
-    a = f'x1="{cx:.1f}" y1="{cy:.1f}" x2="{cx + 0.01:.2f}" y2="{cy:.1f}"'
-    return f'<line {a} class="hitdot"/><line {a} class="ptring"/><line {a} class="{cls}"/>'
+def progress_payload(d):
+    """The numbers behind the Progress charts. The charts themselves are drawn
+    in the browser (web/progress.js), at the size they are shown and zoomable.
+    Tooltip texts are 'Title|line|line', already HTML-escaped."""
+    weeks, iso = d["weeks"], lambda x: x.isoformat()
 
-
-def column_chart(weeks, values, label, fmt=lambda v: f"{v:.0f}", tip=None, bands=None, unit=""):
-    """One column per week. The current week is the accent; earlier weeks are
-    quiet context. `bands` = {week: (lo, hi)} draws a usual-range wash behind."""
-    W, H, left, bottom, top = 760, 230, 58, 28, 14
-    plot_w, plot_h = W - left - 8, H - bottom - top
-    peak = max([v for v in values.values() if v] + [hi for lo, hi in (bands or {}).values()] + [1])
-    step = next(s for s in (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000) if peak / s <= 5)
-    y_max = (int(peak // step) + 1) * step
-    slot = plot_w / len(weeks)
-    bar_w = min(24, slot * 0.62)
-    y = lambda v: top + plot_h - v / y_max * plot_h
-    svg = []
-    for t in range(0, y_max + 1, step):
-        svg.append(f'<line x1="{left}" x2="{W-8}" y1="{y(t):.1f}" y2="{y(t):.1f}" class="grid"/>'
-                   f'<text x="{left-6}" y="{y(t)+4:.1f}" class="tick" text-anchor="end">{fmt(t)}</text>')
-    for i, w in enumerate(weeks):
-        x0 = left + i * slot
-        x = x0 + (slot - bar_w) / 2
-        v = values.get(w) or 0
-        band = (bands or {}).get(w)
-        if band:
-            svg.append(f'<rect x="{x0 + 2:.1f}" y="{y(band[1]):.1f}" width="{slot - 4:.1f}" '
-                       f'height="{max(y(band[0]) - y(band[1]), 1):.1f}" class="rangeband"/>')
-        text = tip(w, v) if tip else f"Week of {w.strftime('%d.%m')}|{fmt(v)}{unit}"
-        cls = "col now" if i == len(weeks) - 1 else "col"
-        svg.append(f'<g class="wk" data-tip="{escape(text)}">'
-                   f'<rect x="{x0:.1f}" y="{top}" width="{slot:.1f}" height="{plot_h}" class="hit"/>')
-        if v > 0:
-            h = max(y(0) - y(v), 2)
-            r = min(4, h / 2)
-            # rounded top, square foot: a path, so the corners sit only where the data ends
-            svg.append(f'<path class="{cls}" d="M{x:.1f} {y(0):.1f}V{y(v) + r:.1f}Q{x:.1f} {y(v):.1f} {x + r:.1f} {y(v):.1f}'
-                       f'H{x + bar_w - r:.1f}Q{x + bar_w:.1f} {y(v):.1f} {x + bar_w:.1f} {y(v) + r:.1f}V{y(0):.1f}Z"/>')
-        if (len(weeks) - 1 - i) % 3 == 0:
-            anchor = "start" if i == 0 else "end" if i == len(weeks) - 1 else "middle"
-            svg.append(f'<text x="{x + bar_w/2:.1f}" y="{H-8}" class="tick" text-anchor="{anchor}">'
-                       f'{w.strftime("%d.%m")}</text>')
-        svg.append("</g>")
-    svg.append(f'<line x1="{left}" x2="{W-8}" y1="{y(0):.1f}" y2="{y(0):.1f}" class="axis"/>')
-    return f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{escape(label)}">{"".join(svg)}</svg>'
+    def load_tip(w, v):
+        band = d["effort_band"].get(w)
+        runs_n = sum(1 for r in d["runs"] if r["_date"].date() - timedelta(days=r["_date"].weekday()) == w)
+        return (f"Week of {w.strftime('%d.%m')}|Effort {v:.0f} from {runs_n} run{'s' if runs_n != 1 else ''}"
+                + (f"|Usual range {band[0]:.0f}–{band[1]:.0f}" if band else ""))
+    km = [round(sum(d["week_km"][w].values()), 1) for w in weeks]
+    return {
+        "load": {"weeks": [iso(w) for w in weeks], "v": [d["week_effort"].get(w, 0) for w in weeks],
+                 "band": [[round(x) for x in d["effort_band"][w]] if w in d["effort_band"] else None for w in weeks],
+                 "tips": [load_tip(w, d["week_effort"].get(w, 0)) for w in weeks]},
+        "dist": {"weeks": [iso(w) for w in weeks], "v": km,
+                 "tips": [f"Week of {w.strftime('%d.%m')}|{v:.1f} km" for w, v in zip(weeks, km)]},
+        "shr": [[round(hr, 1), round(pc, 1), tip, rec] for hr, pc, tip, rec in d["speed_hr"]],
+        "eff": [[iso(dt), round(v, 3), tip] for dt, v, tip in d["eff_points"]],
+        "reps": [[iso(dt), round(v, 1), tip] for dt, v, tip in d["rep_points"]],
+        "cad": [[iso(dt), v, tip] for dt, v, tip in d["cad_points"]],
+    }
 
 
-def dot_trend(points, label, fmt, invert=False, pad=0.15, guide=None):
-    """Dots over time with a rolling average line through them.
-    points = [(date, value, tooltip)]. `invert` puts small values on top (pace).
-    `guide` = (value, text) draws one labelled reference line."""
-    if len(points) < 3:
-        return '<p class="sub">Not enough runs yet - this fills in after a few weeks.</p>'
-    W, H, left, bottom, top = 760, 240, 66, 30, 16
-    plot_w, plot_h = W - left - 12, H - bottom - top
-    vals = [v for _, v, _ in points] + ([guide[0]] if guide else [])
-    lo, hi = min(vals), max(vals)
-    span = max(hi - lo, abs(hi) * 0.04, 1e-6)
-    lo, hi = lo - span * pad, hi + span * pad
-    d0, d1 = points[0][0], points[-1][0]
-    days = max((d1 - d0).days, 1)
-    x = lambda d: left + 14 + (plot_w - 28) * (d - d0).days / days      # dots clear of the axis labels
-    y = lambda v: (top + (v - lo) / (hi - lo) * plot_h) if invert else (top + plot_h - (v - lo) / (hi - lo) * plot_h)
-    svg = []
-    for t in range(4):
-        v = lo + (hi - lo) * (t + 0.5) / 4
-        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="grid"/>'
-                   f'<text x="{left-6}" y="{y(v)+4:.1f}" class="tick" text-anchor="end">{fmt(v)}</text>')
-    if guide:
-        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(guide[0]):.1f}" y2="{y(guide[0]):.1f}" class="guide"/>'
-                   f'<text x="{W-14}" y="{y(guide[0])-5:.1f}" class="tick" text-anchor="end">{escape(guide[1])}</text>')
-    # rolling mean of the 5 nearest runs, so one odd run does not bend the story
-    roll = []
-    for i in range(len(points)):
-        win = [v for _, v, _ in points[max(0, i - 2):i + 3]]
-        roll.append(sum(win) / len(win))
-    svg.append('<polyline class="line" points="' +
-               " ".join(f"{x(d):.1f},{y(v):.1f}" for (d, _, _), v in zip(points, roll)) + '"/>')
-    for d, v, tip in points:
-        svg.append(f'<g class="wk" data-tip="{escape(tip)}">{dot_mark(x(d), y(v), "pt soft")}</g>')
-    for d in (d0, d0 + (d1 - d0) / 2, d1):
-        anchor = "start" if d == d0 else "end" if d == d1 else "middle"
-        svg.append(f'<text x="{x(d):.1f}" y="{H-8}" class="tick" text-anchor="{anchor}">{d.strftime("%d.%m")}</text>')
-    return f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{escape(label)}">{"".join(svg)}</svg>'
-
-
-def speed_hr_chart(points, max_hr):
-    """Each run as a dot: average heart rate across, average pace up (faster
-    higher). Runs from the last four weeks in the accent, older runs grey.
-    points = [(bpm, sec_per_km, tooltip, recent)]."""
-    if len(points) < 4:
-        return '<p class="sub">Not enough runs with heart rate yet.</p>'
-    W, H, left, bottom, top = 760, 320, 66, 36, 26
-    plot_w, plot_h = W - left - 12, H - bottom - top
-    hrs = [p[0] for p in points]
-    paces = [p[1] for p in points]
-    x0, x1 = min(hrs) - 4, max(hrs) + 4
-    p_lo, p_hi = min(paces), max(paces)
-    pad = max((p_hi - p_lo) * 0.12, 5)
-    p_lo, p_hi = p_lo - pad, p_hi + pad
-    x = lambda v: left + (v - x0) / (x1 - x0) * plot_w
-    y = lambda v: top + (v - p_lo) / (p_hi - p_lo) * plot_h          # faster pace sits higher
-    svg = []
-    # the zone boundaries, so you can see which runs strayed into the grey zone
-    for key, name, lo, hi, _ in ZONES:
-        a, b = max(bpm(max_hr, lo), x0), min(bpm(max_hr, hi), x1)
-        if b <= a:
-            continue
-        svg.append(f'<rect x="{x(a):.1f}" y="{top}" width="{x(b) - x(a):.1f}" height="{plot_h}" class="zband z{key}"/>'
-                   f'<text x="{(x(a) + x(b)) / 2:.1f}" y="{top - 7}" class="tick zname" text-anchor="middle">{name}</text>')
-    for t in range(4):
-        v = p_lo + (p_hi - p_lo) * (t + 0.5) / 4
-        svg.append(f'<line x1="{left}" x2="{W-12}" y1="{y(v):.1f}" y2="{y(v):.1f}" class="grid"/>'
-                   f'<text x="{left-6}" y="{y(v)+4:.1f}" class="tick" text-anchor="end">{int(v//60)}:{int(v%60):02d}</text>')
-    step = 10 if x1 - x0 > 40 else 5
-    for v in range(int(x0 // step + 1) * step, int(x1) + 1, step):
-        svg.append(f'<text x="{x(v):.1f}" y="{H-10}" class="tick" text-anchor="middle">{v}</text>')
-    for recent in (False, True):                                 # recent runs drawn on top
-        for hr, pc, tip, rec in points:
-            if rec != recent:
-                continue
-            svg.append(f'<g class="wk" data-tip="{escape(tip)}">{dot_mark(x(hr), y(pc), "pt" if rec else "pt old")}</g>')
-    return (f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Pace against heart rate, one dot per run">'
-            f'{"".join(svg)}</svg>')
+def chart_slot(key, label, empty=None):
+    """An empty box the browser draws a Progress chart into."""
+    note = f'<p class="sub pc-empty" hidden>{empty}</p>' if empty else ""
+    return f'<div class="pc" data-chart="{key}" aria-label="{escape(label)}"></div>{note}'
 
 
 def zone_bar(zone_seconds):
@@ -707,7 +608,7 @@ def page_run(d):
 
 
 def page_progress(d):
-    max_hr, weeks, now = d["max_hr"], d["weeks"], d["this_monday"]
+    max_hr, now = d["max_hr"], d["this_monday"]
 
     # ---- the headline numbers
     effort, band = d["week_effort"].get(now, 0), d["effort_band"].get(now)
@@ -737,46 +638,39 @@ def page_progress(d):
         f'<div class="note">average, 28 days</div></div>'
         '</div>')
 
-    # ---- load
-    def load_tip(w, v):
-        band = d["effort_band"].get(w)
-        runs_n = sum(1 for r in d["runs"] if r["_date"].date() - timedelta(days=r["_date"].weekday()) == w)
-        return (f"Week of {w.strftime('%d.%m')}|Effort {v:.0f} from {runs_n} run{'s' if runs_n != 1 else ''}"
-                + (f"|Usual range {band[0]:.0f}–{band[1]:.0f}" if band else ""))
-    load = (column_chart(weeks, d["week_effort"], "Weekly training load", tip=load_tip, bands=d["effort_band"])
+    # ---- the charts (drawn in the browser from window.PROG)
+    load = (chart_slot("load", "Weekly training load")
             + '<p class="hint">Effort is heart-rate load: every minute of running counted 1 to 5 by how hard it '
               'was (Edwards\' method, from your strap second by second). The shaded band is your usual range - '
               '75–125% of the three weeks before. Building a little at a time and staying near the band is what '
               'lets the body absorb the work; a week far above it is where injuries come from.</p>')
-
-    km_tip = lambda w, v: f"Week of {w.strftime('%d.%m')}|{v:.1f} km"
-    distance = column_chart(weeks, {w: sum(d["week_km"][w].values()) for w in weeks}, "Weekly distance",
-                            fmt=lambda v: f"{v:.0f}", tip=km_tip)
+    distance = chart_slot("dist", "Weekly distance")
 
     zones = (zone_bar(d["zone_seconds"]) +
              f'<p class="hint">Last 28 days, by moving time. The Norwegian method wants roughly 80% easy - '
              f'you are at {d["easy_share"]}.</p>')
 
-    scatter = (speed_hr_chart(d["speed_hr"], max_hr) +
+    scatter = (chart_slot("shr", "Pace against heart rate, one dot per run", "Not enough runs with heart rate yet.") +
                '<p class="hint">One dot per run: heart rate across, pace up. Blue dots are the last four weeks, '
                'grey ones older. As you get fitter the cloud shifts up and left - faster at the same heart rate. '
                'Dots in the grey zone column are the runs to slow down next time.</p>')
 
-    efficiency = (dot_trend(d["eff_points"], "Metres per heartbeat on easy runs",
-                            lambda v: f"{v:.2f}") +
+    efficiency = (chart_slot("eff", "Metres per heartbeat on easy runs",
+                             "Not enough easy runs yet - this fills in after a few weeks.") +
                   '<p class="hint">How far you travel for each heartbeat on easy and long runs. A rising line is '
                   'the aerobic engine improving - the main thing easy running is for. Heat, hills and tiredness '
                   'pull single runs down, so watch the line, not the dots.</p>')
 
-    reps = (dot_trend(d["rep_points"], "Threshold rep pace", lambda v: f"{int(v//60)}:{int(v%60):02d}", invert=True) +
+    reps = (chart_slot("reps", "Threshold rep pace", "No threshold sessions with laps yet.") +
             f'<p class="hint">Average pace of the reps only - the laps at threshold heart rate '
             f'({bpm(max_hr, 82)}+ bpm) - so warm-up, jogs and cool-down do not blur it. Faster reps at the same '
             f'controlled heart rate is the clearest sign the threshold work is paying off.</p>')
 
-    cadence = (dot_trend(d["cad_points"], "Cadence per run", lambda v: f"{v:.0f}") +
-               '<p class="hint">Steps per minute, both feet. There is no magic number - it rises naturally with '
-               'speed, so threshold days sit higher than easy days. What helps is a slow drift upwards on easy runs '
-               'over months: shorter, quicker steps land softer.</p>')
+    cadence = (chart_slot("cad", "Cadence per run", "No cadence recorded yet.") +
+               '<p class="hint">Steps per minute, both feet, one dot per run: red under 160, amber 160–170, green '
+               'above. There is no magic number - it rises naturally with speed, so threshold days sit higher than '
+               'easy days. What helps is a slow drift upwards on easy runs over months: shorter, quicker steps land '
+               'softer.</p>')
 
     rows = []
     for r, dc in d["long_drift"]:
@@ -827,7 +721,8 @@ CSS = _web("app.css")
 
 # The browser code, in load order. The files share one function scope, so a
 # helper in core.js is visible to every file after it.
-APP_FILES = ["core.js", "charts.js", "map.js", "run.js", "mappage.js", "plan.js", "settings.js", "boot.js"]
+APP_FILES = ["core.js", "charts.js", "map.js", "run.js", "mappage.js", "progress.js", "plan.js", "settings.js",
+             "boot.js"]
 APP_JS = "(function () {\n" + "\n".join(_web(f) for f in APP_FILES) + "\n})();\n"
 ROUTER = _web("router.js")
 
@@ -976,7 +871,8 @@ def render(activities, config, details=None, notes=None, plan=None):
     blob = lambda obj: json.dumps(obj, separators=(",", ":")).replace("</", "<\\/")
     data = (f'<script>window.CONF={blob(conf)};window.RUNS={blob(runs_payload(d))};'
             f'window.NOTES={blob(notes or {})};'
-            f'window.PLAN={blob({"standard": standard_plan(d["today"]), "saved": plan})};</script>')
+            f'window.PLAN={blob({"standard": standard_plan(d["today"]), "saved": plan})};'
+            f'window.PROG={blob(progress_payload(d))};</script>')
     nav = "".join(f'<a href="#/{key}">{icon(key)}<span>{label}</span></a>' for key, label in PAGES)
 
     return f"""<!doctype html>

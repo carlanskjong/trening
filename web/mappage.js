@@ -222,7 +222,7 @@
         shown = chosen();
         map = new ml.Map({
           container: box, style: styleFor(state.basemap), bounds: homeBounds(shown.length ? shown : runs.filter(routeGeo)) || undefined,
-          fitBoundsOptions: { padding: 40 }, attributionControl: { compact: true }, maxPitch: 78,
+          fitBoundsOptions: { padding: 40 }, attributionControl: { compact: true }, maxPitch: 72,
           pixelRatio: Math.min(window.devicePixelRatio || 1, 2), fadeDuration: 150
         });
         var loaded = false, fell = false, placed = false;
@@ -238,6 +238,7 @@
           stats();
         });
         keepCreditsFolded(map, box);
+        autoThree(map, function () { return state.three; }, function (on) { state.three = on; markChoices(); });
         map.on('click', function (e) {
           var hit = map.queryRenderedFeatures([[e.point.x - 10, e.point.y - 10], [e.point.x + 10, e.point.y + 10]], { layers: ['routes-hit'] });
           if (hit.length) pick(hit[0].properties.id, false); else unpick();
