@@ -106,6 +106,11 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   every tile and may never come on a poor connection). In 3D, frame as if flat and then tilt – MapLibre's own
   tilted fit backs far off. With no signal the basemap falls back to a blank style after 9 s and the route
   still draws. A map is torn down when its page is left (phones allow few WebGL contexts).
+  **Every map is drawn at `pixelRatio: 2` whatever the screen** (`MAP_PIXELS` in map.js, with `maxCanvasSize`
+  8192): MapLibre renders the heat map into a buffer 1/4 of the canvas wide and high, so on a 1× PC screen it was
+  1/4 of screen resolution and looked blocky (he saw it on the web version, not the phone). Measured 25.09.2026 at
+  1280/1920 wide × scaling 1/1.25/2: the canvas always matched its box (MapLibre 6 has its own ResizeObserver),
+  so it was the resolution, not stretching.
   The **Map tab** (`mappage.js`): every run on one map. *Heat map* = MapLibre `heatmap` over points every 20 m
   along every route, intensity calibrated per zoom so one pass ≈ 13% of the scale and ~8 passes ≈ "often";
   fades into the paths from zoom 13. *Routes* = each run coloured by kind. Filters: period and kind. Tap a route
@@ -144,8 +149,20 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   (countdown + Riegel prediction, from Settings), tiles, latest run judged by type, **last week in review**.
 - `config.json` – client_id (281348), max_hr, timezone. (plan_start/plan_days are gone: dates come from
   `training_plan.py`, and moving sessions is done in the calendar.)
-- `.github/workflows/update.yaml` – hourly (cron `17 * * * *`), manual dispatch, and on push to main. Deploys to
-  GitHub Pages (Source: GitHub Actions). Commits `token.enc` and `cache/`, plus a keep-alive commit if idle > 40 days.
+- `.github/workflows/update.yaml` – cron `17 * * * *` (**GitHub actually runs it only every ~5–6 h on a free
+  account**), `workflow_dispatch` (with an optional `reason` input shown as the run name), and on push to main.
+  Deploys to GitHub Pages (Source: GitHub Actions). Commits `token.enc` and `cache/`, plus a keep-alive commit if
+  idle > 40 days.
+- **Instant import (25.09.2026)** – `webhook/` is a separate tiny **Netlify** site (his existing account; Base
+  directory `webhook`) with one function, `netlify/functions/strava.mjs`: Strava's webhook calls
+  `/strava/<WEBHOOK_KEY>`, the function answers Strava's validation GET and on an activity event starts
+  `update.yaml` through **workflow_dispatch** (not repository_dispatch: that would need a token with Contents
+  write; this one has only **Actions: Read and write**). Answers Strava within 1.5 s even if GitHub hangs. Netlify
+  env: `WEBHOOK_KEY`, `GH_TOKEN`, optional `STRAVA_ATHLETE_ID`. `netlify.toml` skips Netlify deploys unless
+  `webhook/` changed (Netlify's free plan counts deploys). `.github/workflows/strava-webhook.yaml` +
+  `webhook/subscribe.py` register / show / remove the Strava subscription (GitHub secret `WEBHOOK_KEY`, same value).
+  His setup steps are in `webhook/README.md`. Settings also has **Fetch new runs now** (same workflow_dispatch with
+  the device's token, which then needs Actions: Read and write too), and polls for the new version for 8 min.
 - `token.enc` – Strava refresh token, AES with a key from `STRAVA_CLIENT_SECRET`. Never commit it in plaintext.
 - `settings.enc` holds `max_hr` and an optional `race` `{name, date, m, goal}` – both validated in `load_settings()`.
 - `notes.enc`, `settings.enc`, `plan.enc` – written **from the browser** with the dashboard password (the login
@@ -154,7 +171,8 @@ mostly truly easy running + controlled (lactate-guided / sub-)threshold interval
   needs no token – the page pulls them from `raw.githubusercontent.com`. Every save goes to `localStorage`
   first. A push triggers the rebuild, which bakes the change into the page. Appearance, basemap and route
   style are per device (`pref-*`), not synced.
-- GitHub secrets (do not rename): `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`, `DASHBOARD_PASSWORD`.
+- GitHub secrets (do not rename): `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`, `DASHBOARD_PASSWORD`, and
+  `WEBHOOK_KEY` (only for the doorbell).
 - Live site: `https://<username>.github.io/trening/` – added to phone home screen as a web app.
 
 ## Testing without Strava access

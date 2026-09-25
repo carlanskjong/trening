@@ -1,0 +1,36 @@
+name: Strava webhook
+
+# Connects Strava to the doorbell on Netlify (see webhook/README.md), so a new
+# activity starts a build at once. Run it by hand: Actions -> Strava webhook ->
+# Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "register = connect Strava, show = see what is connected, remove = disconnect"
+        type: choice
+        options: [register, show, remove]
+        default: register
+      site:
+        description: "Your Netlify site address, e.g. https://trening-strava.netlify.app (for register)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  subscription:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Talk to Strava
+        env:
+          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
+          WEBHOOK_KEY: ${{ secrets.WEBHOOK_KEY }}
+          ACTION: ${{ inputs.action }}
+          SITE: ${{ inputs.site }}
+        run: python webhook/subscribe.py "$ACTION" "$SITE"

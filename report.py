@@ -715,7 +715,14 @@ def page_settings(d):
         f'<span class="hint" id="racestatus"></span></div>'
         f'<p class="hint">Home then counts down to it and predicts a time from your recent best efforts. '
         f'Saved encrypted with the other settings.</p>')
-    return (card(appearance, head="Appearance")
+    refresh = (
+        '<div class="noterow"><button type="button" id="refreshnow">Fetch new runs now</button>'
+        '<span class="hint" id="refreshstatus"></span></div>'
+        '<p class="hint">New runs normally arrive by themselves a minute or two after they reach Strava. This '
+        'starts an update straight away - handy if one seems to be missing. It uses the GitHub token below, '
+        'which needs "Actions: Read and write" for this.</p>')
+    return (card(refresh, head="New runs")
+            + card(appearance, head="Appearance")
             + card(maps, head="Maps")
             + card(training, head="Training")
             + card(race_card, head="Race goal")

@@ -1,0 +1,12 @@
+# A tiny Netlify site with one job: Strava's "doorbell" (see README.md here).
+# Netlify builds it from this folder (Base directory: webhook).
+[build]
+  publish = "public"
+  command = "echo 'Nothing to build - one function only.'"
+  # Deploy only when this folder changes: every push to main would otherwise
+  # cost a deploy (Netlify's free plan counts them). On the very first build
+  # both refs are the same commit, so that one always goes ahead.
+  ignore = "if [ \"$CACHED_COMMIT_REF\" = \"$COMMIT_REF\" ]; then exit 1; fi; git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- ."
+
+[functions]
+  directory = "netlify/functions"
