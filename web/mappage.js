@@ -239,7 +239,7 @@
         map = new ml.Map({
           container: box, style: styleFor(state.basemap), bounds: homeBounds(shown.length ? shown : runs.filter(routeGeo)) || undefined,
           fitBoundsOptions: { padding: 40 }, attributionControl: { compact: true }, maxPitch: 72,
-          pixelRatio: Math.min(window.devicePixelRatio || 1, 2), fadeDuration: 150
+          pixelRatio: MAP_PIXELS.pixelRatio, maxCanvasSize: MAP_PIXELS.maxCanvasSize, fadeDuration: 150
         });
         var loaded = false, fell = false, placed = false;
         var timer = setTimeout(function () { if (!loaded && !fell) { fell = true; map.setStyle(blankStyle(), { diff: false }); } }, 9000);

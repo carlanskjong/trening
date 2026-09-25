@@ -1,9 +1,18 @@
 name: Update dashboard
+run-name: ${{ inputs.reason || github.event_name }}
 
 on:
   schedule:
-    - cron: "17 * * * *"   # every hour
-  workflow_dispatch:        # adds a "Run workflow" button
+    - cron: "17 * * * *"   # every hour - in practice GitHub runs it every few hours; the doorbell is the fast path
+  # The "Run workflow" button, the app's Refresh button (Settings) and Strava's
+  # doorbell on Netlify (webhook/) all start a build this way. It needs only a
+  # token with "Actions: Read and write", which cannot change the code.
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why this build (shown in the list of runs)"
+        required: false
+        default: "Run by hand"
   push:
     branches: [main]
 

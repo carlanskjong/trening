@@ -102,6 +102,45 @@
     });
     if (store.token()) document.getElementById('tokenstatus').textContent = 'A token is saved on this device.';
 
+    // Start a build now instead of waiting: the same thing Strava's doorbell does.
+    var refreshOut = document.getElementById('refreshstatus');
+    document.getElementById('refreshnow').addEventListener('click', async function () {
+      var btn = this, token = store.token();
+      if (!token) { refreshOut.textContent = 'Needs the GitHub token (further down).'; return; }
+      if (!conf.repo) { refreshOut.textContent = 'This build does not know which repository it comes from.'; return; }
+      btn.disabled = true;
+      refreshOut.textContent = 'Asking GitHub…';
+      try {
+        var r = await fetch('https://api.github.com/repos/' + conf.repo + '/actions/workflows/update.yaml/dispatches', {
+          method: 'POST',
+          headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json' },
+          body: JSON.stringify({ ref: 'main', inputs: { reason: 'Refresh from the app' } })
+        });
+        if (r.status === 204) {
+          refreshOut.textContent = 'Started. New runs arrive in about two minutes - the "Update ready" bar appears when they do.';
+          watchForUpdate();
+        } else if (r.status === 403 || r.status === 404) {
+          refreshOut.textContent = 'GitHub said no: the token needs "Actions: Read and write" as well (see the steps in the update notes).';
+        } else if (r.status === 401) {
+          refreshOut.textContent = 'GitHub did not accept the token - it may have expired.';
+        } else {
+          refreshOut.textContent = 'GitHub answered ' + r.status + '. Try again in a minute.';
+        }
+      } catch (e) {
+        refreshOut.textContent = 'No connection to GitHub right now.';
+      }
+      btn.disabled = false;
+    });
+    // Look for the new version every 30 s for a while, so the bar shows as soon as it is live.
+    function watchForUpdate() {
+      if (!('serviceWorker' in navigator)) return;
+      var tries = 0;
+      var tick = setInterval(function () {
+        if (++tries > 16 || !document.getElementById('update').hidden) { clearInterval(tick); return; }
+        navigator.serviceWorker.getRegistration().then(function (reg) { if (reg) reg.update().catch(function () {}); });
+      }, 30000);
+    }
+
     document.getElementById('checkupdate').addEventListener('click', function () {
       var out = document.getElementById('updatestatus');
       out.textContent = 'Checking…';

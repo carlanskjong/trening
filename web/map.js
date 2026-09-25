@@ -31,6 +31,17 @@
     return BASEMAPS.some(function (b) { return b.id === v; }) ? v : 'map';
   }
 
+  /*
+   * Every map is drawn at twice the screen's resolution, whatever the screen.
+   * MapLibre paints the heat map into a buffer a quarter of the canvas wide
+   * and high, so on an ordinary 1x PC screen the heat came out at a quarter of
+   * screen resolution - visibly blocky, while phones (2x) looked fine. At 2x
+   * the heat is at half resolution everywhere, and lines and labels on a 1x
+   * screen get smoothed on the way down. The bigger canvas limit lets a wide
+   * monitor keep the full 2x instead of MapLibre quietly lowering it.
+   */
+  var MAP_PIXELS = { pixelRatio: 2, maxCanvasSize: [8192, 8192] };
+
   var mlReady = null;
   function loadMapLibre() {
     if (!mlReady) {
@@ -413,7 +424,7 @@
         bounds: g.bounds, fitBoundsOptions: { padding: opts.padding || 36 },
         interactive: opts.interactive !== false, attributionControl: { compact: true },
         maxPitch: 72, fadeDuration: 150, dragRotate: true, pitchWithRotate: true,
-        pixelRatio: Math.min(window.devicePixelRatio || 1, 2)
+        pixelRatio: MAP_PIXELS.pixelRatio, maxCanvasSize: MAP_PIXELS.maxCanvasSize
       });
       var loaded = false, fellBack = false;
       var fallBack = function () {
