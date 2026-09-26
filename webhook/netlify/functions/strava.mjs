@@ -29,10 +29,19 @@ function same(a, b) {
   return diff === 0;
 }
 
+// The key from the address, read from the path itself (decoded, so a key with
+// symbols works), with the router's own parameter as a fallback.
+function keyInPath(url, context) {
+  const last = url.pathname.split('/').filter(Boolean).pop() || '';
+  try { return decodeURIComponent(last); } catch { return context.params?.key || ''; }
+}
+
 export default async (req, context) => {
   const key = env('WEBHOOK_KEY');
-  if (!key || !same(context.params?.key || '', key)) return new Response('Not found', { status: 404 });
   const url = new URL(req.url);
+  // Different words for the two failures, so the "Strava webhook" workflow can tell them apart.
+  if (!key) return new Response('Not set up: WEBHOOK_KEY is missing in Netlify', { status: 404 });
+  if (!same(keyInPath(url, context), key)) return new Response('Not found: wrong key', { status: 404 });
 
   // Strava checks the address once, when the subscription is created.
   if (req.method === 'GET') {

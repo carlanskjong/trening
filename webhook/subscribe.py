@@ -34,6 +34,42 @@ def call(method, url, data=None):
         return e.code, e.read().decode(errors="replace")[:500]
 
 
+def probe(callback, key):
+    """Knock on the doorbell exactly the way Strava will, and say plainly what
+    answered - Strava itself only reports "does not return 200"."""
+    url = callback + "?" + urllib.parse.urlencode(
+        {"hub.mode": "subscribe", "hub.challenge": "probe-123", "hub.verify_token": key})
+    req = urllib.request.Request(url, headers={"User-Agent": "trening-webhook-check"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            status, text = r.status, r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        status, text = e.code, e.read().decode(errors="replace")
+    except Exception as e:
+        print(f"::error::Could not reach the Netlify site at all ({e}). Check the address - it is shown at the top "
+              f"of the project in Netlify, like https://something.netlify.app")
+        return False
+    short = " ".join(text.split())[:120]
+    if status == 200 and "probe-123" in text:
+        print("Checked the doorbell: it answers correctly.")
+        return True
+    if "WEBHOOK_KEY is missing" in text:
+        why = ("the function runs, but Netlify has no WEBHOOK_KEY. Add it under Project configuration -> "
+               "Environment variables, then Deploys -> Trigger deploy -> Deploy project.")
+    elif "wrong key" in text:
+        why = ("the function runs, but its WEBHOOK_KEY is not the same as the GitHub secret WEBHOOK_KEY. Paste the "
+               "same key into both (no spaces), then Deploys -> Trigger deploy -> Deploy project in Netlify.")
+    elif status == 403:
+        why = "the key matches, but the check was refused - tell Claude what this says: " + short
+    elif status == 404:
+        why = ("Netlify's own 'Page not found': the function is not on this site. Check Base directory = webhook "
+               "and that the latest deploy is Published, and that the address is right.")
+    else:
+        why = f"unexpected answer - tell Claude what this says: {short}"
+    print(f"::error::The doorbell answered {status}: {why}")
+    return False
+
+
 def main():
     action = sys.argv[1] if len(sys.argv) > 1 else "show"
     site = (sys.argv[2] if len(sys.argv) > 2 else "").strip().rstrip("/")
@@ -67,7 +103,10 @@ def main():
         print("Strava is disconnected from the doorbell. The scheduled builds carry on as before.")
         return
 
-    status, body = call("POST", API, {**auth, "callback_url": f"{site}/strava/{key}", "verify_token": key})
+    callback = f"{site}/strava/{urllib.parse.quote(key, safe='')}"
+    if not probe(callback, key):
+        sys.exit(1)
+    status, body = call("POST", API, {**auth, "callback_url": callback, "verify_token": key})
     if status in (200, 201) and isinstance(body, dict) and body.get("id"):
         print(f"Connected: subscription {body['id']}. A new Strava activity now starts a build within seconds.")
     else:
